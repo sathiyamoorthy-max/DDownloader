@@ -23,7 +23,7 @@ def banners():
     stdout.write(""+Fore.YELLOW   +"╔════════════════════════════════════════════════════════════════════════════╝\n")
     stdout.write(""+Fore.YELLOW   +"║ \x1b[38;2;255;20;147m• "+Fore.GREEN+"GITHUB             "+Fore.RED+"    |"+Fore.LIGHTWHITE_EX+"   GITHUB.COM/THATNOTEASY                        "+Fore.YELLOW+"║\n")
     stdout.write(""+Fore.YELLOW   +"╚════════════════════════════════════════════════════════════════════════════╝\n") 
-    print(f"{Fore.YELLOW}[DDownloader] - {Fore.GREEN}A DRM-Protected & Non-Protected Content Downloader - {Fore.RED}[V0.4.1] \n{Fore.RESET}")
+    print(f"{Fore.YELLOW}[DDownloader] - {Fore.GREEN}A DRM-Protected & Non-Protected Content Downloader - {Fore.RED}[V0.4.3] \n{Fore.RESET}")
 
 # =========================================================================================================== #
 
@@ -45,6 +45,7 @@ def display_help():
         f"  {Fore.GREEN}-o, --output{' ' * 19}{Style.RESET_ALL}Name of the output file 💾\n"
         f"  {Fore.GREEN}-k, --key{' ' * 22}{Style.RESET_ALL}Decryption key in KID:KEY format 🔑\n"
         f"  {Fore.GREEN}-H, --header{' ' * 19}{Style.RESET_ALL}Custom HTTP headers (e.g., User-Agent: value) 📋\n"
+        f"  {Fore.GREEN}-c, --cookies{' ' * 19}{Style.RESET_ALL}Cookies file (e.g., netscape/json formatter) 📋\n"
         f"{Fore.RED}.++" + "═" * 100 + f"++.{Style.RESET_ALL}\n"
         f"  {Fore.GREEN}-i, --input{' ' * 20}{Style.RESET_ALL}Input file for re-encoding. 📂\n"
         f"  {Fore.GREEN}-q, --quality{' ' * 18}{Style.RESET_ALL}Target quality: HD, FHD, UHD. 🎥\n"

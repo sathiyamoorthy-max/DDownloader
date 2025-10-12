@@ -15,6 +15,7 @@ def parse_arguments():
     parser.add_argument("-o", "--output", help=argparse.SUPPRESS)
     parser.add_argument("-k", "--key", action="append", help=argparse.SUPPRESS)
     parser.add_argument("-H", "--header", action="append", help=argparse.SUPPRESS)
+    parser.add_argument("-c", "--cookies", help=argparse.SUPPRESS)
     parser.add_argument("-i", "--input", help=argparse.SUPPRESS)
     parser.add_argument("-q", "--quality", help=argparse.SUPPRESS)
     parser.add_argument("--auto-select", 

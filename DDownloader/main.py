@@ -89,6 +89,7 @@ def main():
             logger.info("YouTube URL detected. Initializing YouTube downloader...")
             print(Fore.RED + "═" * 100 + Fore.RESET)
             is_playlist = "list=" in args.url
+            downloader.cookies = args.cookies
             downloader.youtube_downloader(
                 url=args.url,
                 output_file=os.path.join(downloads_dir, args.output),
@@ -96,8 +97,20 @@ def main():
                 playlist=is_playlist
             )
             exit(0)
+        elif re.search(r"iq\.com", args.url, re.IGNORECASE):
+            logger.info("IQ.com URL detected. Initializing IQ.com downloader...")
+            print(Fore.RED + "═" * 100 + Fore.RESET)
+            # Set default output name if not provided
+            output_name = args.output if args.output else "iq_video"
+            downloader.cookies = args.cookies
+            downloader.iq_downloader(
+                url=args.url,
+                output_file=os.path.join(downloads_dir, output_name),
+                download_type="mp4"
+            )
+            exit(0)
         else:
-            logger.error("Unsupported URL format. Please provide a valid DASH (.mpd), HLS (.m3u8), ISM (.ism), or YouTube URL.")
+            logger.error("Unsupported URL format. Please provide a valid DASH (.mpd), HLS (.m3u8), ISM (.ism), YouTube, or IQ.com URL.")
             exit(1)
 
         downloader.manifest_url = args.url

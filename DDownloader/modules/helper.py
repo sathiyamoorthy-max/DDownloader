@@ -21,11 +21,12 @@ binaries = {
         "https://github.com/ThatNotEasy/DDownloader/raw/refs/heads/main/DDownloader/bin/aria2c.exe",
         "https://github.com/ThatNotEasy/DDownloader/raw/refs/heads/main/DDownloader/bin/mp4decrypt.exe",
         "https://github.com/ThatNotEasy/DDownloader/raw/refs/heads/main/DDownloader/bin/shaka-packager.exe",
-        "https://github.com/ThatNotEasy/DDownloader/raw/refs/heads/main/DDownloader/bin/yt-dlp.exe",
-        "https://github.com/ThatNotEasy/DDownloader/raw/refs/heads/main/DDownloader/bin/mkvmerge.exe"
+        "https://github.com/ThatNotEasy/DDownloader/raw/refs/heads/main/DDownloader/bin/mkvmerge.exe",
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
     ],
     "Linux": [
-        "https://github.com/ThatNotEasy/DDownloader/raw/refs/heads/main/DDownloader/bin/N_m3u8DL-RE"
+        "https://github.com/ThatNotEasy/DDownloader/raw/refs/heads/main/DDownloader/bin/N_m3u8DL-RE",
+        "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
     ]
 }
 
