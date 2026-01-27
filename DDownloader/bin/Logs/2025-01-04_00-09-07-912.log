@@ -1,7 +1,0 @@
-﻿LOG 2025/01/04
-Save Path: f:\pari\personal-project\mylibrary\ddownloader\DDownloader\bin\Logs
-Task Start: 2025/01/04 00:09:07
-Task CommandLine: f:\pari\personal-project\mylibrary\ddownloader\DDownloader\modules\../bin/N_m3u8DL-RE.exe https://cdn.bitmovin.com/content/assets/art-of-motion_drm/mpds/11331.mpd --auto-select -mt -M format=mp4 --save-dir downloads --tmp-dir downloads --save-name bitmovin --key ccbf5fb4c2965be7aa130ffb3ba9fd73:9cc0c92044cb1d69433f5f5839a159df --key 9bf0e9cf0d7b55aeb4b289a63bab8610:90f52fd8ca48717b21d0c2fed7a12ae1 --key eb676abbcb345e96bbcf616630f1a3da:100b6c20940f779a4589152b57d2dacb --key 0294b9599d755de2bbf0fdca3fa5eab7:3bda2f40344c7def614227b9c0f03e26 --key 639da80cf23b55f3b8cab3f64cfa5df6:229f5f29b643e203004b30c4eaf348f4
-
-00:09:07.913 INFO : N_m3u8DL-RE (Beta version) 20241203
-00:09:07.915 ERROR: ffmpeg not found, please download at: https://ffmpeg.org/download.html
