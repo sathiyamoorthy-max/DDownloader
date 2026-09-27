@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: ddownloader-telegram-bot
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+
+      - key: ALLOWED_USER_IDS
+        sync: false
+
+      - key: MAX_UPLOAD_MB
+        value: "49"
+
+      - key: MAX_VIDEO_HEIGHT
+        value: "1080"
+
+      - key: MAX_CONCURRENT_DOWNLOADS
+        value: "1"
+
+      - key: RATE_LIMIT_SECONDS
+        value: "5"
+
+      - key: LOG_LEVEL
+        value: "INFO"
