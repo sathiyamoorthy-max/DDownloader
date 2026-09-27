@@ -1112,8 +1112,9 @@ def maybe_compress_audio_for_upload(
     job_dir: Path,
 ) -> Path:
     """
-    Compress oversized audio to a bitrate calculated from its duration so the
-    result targets ~94% of the configured Telegram upload limit.
+    Keep oversized audio as ONE file. Re-encode it to a bitrate calculated
+    from the duration so the result fits under the configured Telegram limit.
+    No splitting is performed.
     """
     if path.stat().st_size <= MAX_UPLOAD_BYTES:
         return path
@@ -1127,45 +1128,59 @@ def maybe_compress_audio_for_upload(
         return path
 
     duration = media_duration_seconds(path)
-    target_bytes = int(MAX_UPLOAD_BYTES * 0.94)
+    target_bytes = int(MAX_UPLOAD_BYTES * 0.90)
 
-    bitrate_steps = [128, 112, 96, 80, 64, 56, 48, 40, 32, 24]
+    # Try progressively lower mono MP3 bitrates until one single file fits.
+    bitrate_steps = [
+        128, 112, 96, 80, 64, 56, 48, 40,
+        32, 28, 24, 20, 16, 12, 8,
+    ]
 
     if duration:
-        calculated_kbps = int(
-            (target_bytes * 8 / duration / 1000) * 0.92
+        calculated_kbps = max(
+            8,
+            int((target_bytes * 8 / duration / 1000) * 0.90),
         )
         candidates = [
             kbps for kbps in bitrate_steps
             if kbps <= calculated_kbps
         ]
         if not candidates:
-            candidates = [24]
+            candidates = [8]
     else:
-        candidates = [48, 40, 32, 24]
+        candidates = list(bitrate_steps)
 
-    # Ensure fallback bitrates are tried even if the calculated value was a
-    # little optimistic due to MP3/container overhead.
+    # Always keep lower bitrate fallbacks available.
+    lowest = candidates[-1]
     for kbps in bitrate_steps:
-        if kbps < candidates[-1] and kbps not in candidates:
+        if kbps < lowest and kbps not in candidates:
             candidates.append(kbps)
 
+    successful = []
+
     for kbps in candidates:
-        output = job_dir / f"{path.stem}_compressed_{kbps}k.mp3"
+        output = job_dir / f"{path.stem}_single_{kbps}k.mp3"
+
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-y",
+            "-i", str(path),
+            "-vn",
+            "-ac", "1",
+            "-codec:a", "libmp3lame",
+            "-b:a", f"{kbps}k",
+        ]
+
+        # Very low bitrates are more stable with a lower sample rate.
+        if kbps <= 24:
+            cmd.extend(["-ar", "16000"])
+
+        cmd.append(str(output))
 
         completed = subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel", "error",
-                "-y",
-                "-i", str(path),
-                "-vn",
-                "-ac", "1",
-                "-codec:a", "libmp3lame",
-                "-b:a", f"{kbps}k",
-                str(output),
-            ],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1177,114 +1192,31 @@ def maybe_compress_audio_for_upload(
             and output.exists()
             and output.stat().st_size > 0
         ):
+            successful.append(output)
             if output.stat().st_size <= target_bytes:
                 return output
 
-    # Return the smallest successful compressed output, if any.
-    compressed = sorted(
-        [
-            p for p in job_dir.glob(f"{path.stem}_compressed_*k.mp3")
-            if p.is_file() and p.stat().st_size > 0
-        ],
-        key=lambda p: p.stat().st_size,
-    )
-    return compressed[0] if compressed else path
+    # Never split. Return the smallest one-file result if compression worked.
+    if successful:
+        return min(successful, key=lambda p: p.stat().st_size)
 
-
-def split_audio_for_upload(
-    path: Path,
-    job_dir: Path,
-) -> list[Path]:
-    """
-    Final fallback: split an oversized audio file into Telegram-safe parts.
-    """
-    if path.stat().st_size <= MAX_UPLOAD_BYTES:
-        return [path]
-
-    if path.suffix.lower() not in {
-        ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav"
-    }:
-        return [path]
-
-    if shutil.which("ffmpeg") is None:
-        return [path]
-
-    duration = media_duration_seconds(path)
-    if not duration:
-        return [path]
-
-    target_bytes = int(MAX_UPLOAD_BYTES * 0.90)
-
-    for safety in (0.85, 0.70, 0.55):
-        segment_seconds = max(
-            60,
-            int(
-                duration
-                * target_bytes
-                / max(path.stat().st_size, 1)
-                * safety
-            ),
-        )
-
-        for old_part in job_dir.glob("upload_part_*.mp3"):
-            try:
-                old_part.unlink()
-            except OSError:
-                pass
-
-        pattern = str(job_dir / "upload_part_%03d.mp3")
-        completed = subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel", "error",
-                "-y",
-                "-i", str(path),
-                "-map", "0:a:0",
-                "-c", "copy",
-                "-f", "segment",
-                "-segment_time", str(segment_seconds),
-                "-reset_timestamps", "1",
-                pattern,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=60 * 60,
-        )
-
-        parts = sorted(
-            p for p in job_dir.glob("upload_part_*.mp3")
-            if p.is_file() and p.stat().st_size > 0
-        )
-
-        if (
-            completed.returncode == 0
-            and len(parts) >= 2
-            and all(p.stat().st_size <= MAX_UPLOAD_BYTES for p in parts)
-        ):
-            return parts
-
-    return [path]
+    return path
 
 
 def prepare_upload_files(
     path: Path,
     job_dir: Path,
 ) -> list[Path]:
-    compressed = maybe_compress_audio_for_upload(
-        path,
-        job_dir,
-    )
-
-    if compressed.stat().st_size <= MAX_UPLOAD_BYTES:
-        return [compressed]
-
-    return split_audio_for_upload(
-        compressed,
-        job_dir,
-    )
-
+    """
+    Always return exactly one audio file. Oversized audio is compressed;
+    it is never split into parts.
+    """
+    return [
+        maybe_compress_audio_for_upload(
+            path,
+            job_dir,
+        )
+    ]
 
 def download_media(
     url: str,
@@ -1704,7 +1636,7 @@ def process_one_url(
         set_job(
             user_id,
             "processing",
-            "Compressing/splitting oversized audio if needed…",
+            "Compressing oversized audio into one file if needed…",
         )
 
         upload_files = prepare_upload_files(
@@ -1800,7 +1732,7 @@ def process_one_url(
             (
                 f"{clean_title(title)} • "
                 f"{human_bytes(total_upload_size)} • "
-                f"{part_count} file(s)"
+                "1 audio file"
             ),
         )
 
