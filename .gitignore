@@ -1,57 +1,13 @@
-# Python cache
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-.lh/
-
-# Virtual environment
-venv/
-env/
-ENV/
-
-# Logs and debug files
+*.py[cod]
 *.log
-*.debug
-
-# Compiled files
-*.so
-
-# Jupyter Notebook checkpoints
-.ipynb_checkpoints/
-
-# IDE specific files
-.vscode/
-.idea/
-*.swp
-
-# OS generated files
-.DS_Store
-Thumbs.db
-
-# Build artifacts
+downloads/
+.env
 build/
 dist/
 *.egg-info/
-.eggs/
-
-# Temporary files
-*.tmp
-*.bak
-*.old
-*.orig
-
-# Coverage and testing artifacts
-.coverage
-*.cover
-coverage.xml
-.hypothesis/
-.tox/
-.pytest_cache/
-
-# Configuration files
-*.cfg
-*.ini
-pip.sh
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
 DDownloader/bin/*
-downloads/*
