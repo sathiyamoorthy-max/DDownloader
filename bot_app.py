@@ -14,7 +14,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from flask import Flask, jsonify, request
+import requests
 import telebot
+from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
@@ -35,6 +37,9 @@ MAX_CONCURRENT_DOWNLOADS = max(
 )
 RATE_LIMIT_SECONDS = max(
     0, int(os.getenv("RATE_LIMIT_SECONDS", "5"))
+)
+PROGRESS_UPDATE_SECONDS = max(
+    1, int(os.getenv("PROGRESS_UPDATE_SECONDS", "2"))
 )
 
 _raw_allowed = os.getenv("ALLOWED_USER_IDS", "").strip()
@@ -224,9 +229,25 @@ def safe_error(exc: Exception) -> str:
             "authorized media."
         )
 
+    if "unsupported url" in lower:
+        return (
+            "This website/page is not supported by the downloader. "
+            "Try a direct public media URL (.mp3/.m4a/.mp4/.m3u8/.mpd) "
+            "or another supported public source."
+        )
+
+    if "http error 403" in lower or "forbidden" in lower:
+        return (
+            "The media server refused access (HTTP 403). "
+            "The URL may be expired, private, or require authorization."
+        )
+
+    if "http error 404" in lower or "not found" in lower:
+        return "The media URL was not found or has expired (HTTP 404)."
+
     # Do not flood Telegram with huge yt-dlp/ffmpeg logs.
-    if len(text) > 1600:
-        text = text[-1600:]
+    if len(text) > 1200:
+        text = text[-1200:]
 
     return text
 
@@ -250,6 +271,214 @@ def clear_job(user_id: int):
         _jobs.pop(user_id, None)
 
 
+def human_bytes(value) -> str:
+    if value is None:
+        return "?"
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "?"
+
+    units = ["B", "KB", "MB", "GB", "TB"]
+    index = 0
+    while value >= 1024 and index < len(units) - 1:
+        value /= 1024
+        index += 1
+
+    if index == 0:
+        return f"{int(value)} {units[index]}"
+    return f"{value:.1f} {units[index]}"
+
+
+def human_speed(value) -> str:
+    if not value:
+        return "?"
+    return f"{human_bytes(value)}/s"
+
+
+def clean_title(value, fallback="media") -> str:
+    title = str(value or fallback).strip().replace("\n", " ")
+    title = re.sub(r"\s+", " ", title)
+    return title[:180] or fallback
+
+
+def edit_status(chat_id: int, message_id: int, text: str) -> None:
+    try:
+        bot.edit_message_text(
+            text,
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+    except Exception:
+        # Telegram returns an error when the text is unchanged; ignore it.
+        pass
+
+
+def make_download_progress_hook(
+    user_id: int,
+    chat_id: int,
+    status_message_id: int,
+):
+    last = {"time": 0.0, "percent": -1.0}
+
+    def hook(data):
+        status = data.get("status")
+
+        if status == "downloading":
+            downloaded = data.get("downloaded_bytes") or 0
+            total = data.get("total_bytes") or data.get("total_bytes_estimate")
+            speed = data.get("speed")
+            eta = data.get("eta")
+
+            percent = None
+            if total:
+                percent = max(0.0, min(100.0, downloaded * 100.0 / total))
+
+            parts = []
+            if percent is not None:
+                parts.append(f"{percent:.1f}%")
+            parts.append(
+                f"{human_bytes(downloaded)} / {human_bytes(total)}"
+                if total else human_bytes(downloaded)
+            )
+            if speed:
+                parts.append(human_speed(speed))
+            if eta is not None:
+                parts.append(f"ETA {int(eta)}s")
+
+            detail = " • ".join(parts)
+            set_job(user_id, "downloading", detail)
+
+            now = time.time()
+            should_update = (
+                now - last["time"] >= PROGRESS_UPDATE_SECONDS
+                or (percent is not None and percent >= 99.5)
+            )
+
+            if should_update:
+                last["time"] = now
+                if percent is not None:
+                    last["percent"] = percent
+                edit_status(
+                    chat_id,
+                    status_message_id,
+                    "⬇️ Downloading\n" + detail,
+                )
+
+        elif status == "finished":
+            total = data.get("total_bytes") or data.get("downloaded_bytes")
+            detail = f"Downloaded {human_bytes(total)}. Processing…"
+            set_job(user_id, "processing", detail)
+            edit_status(
+                chat_id,
+                status_message_id,
+                "✅ Download complete\nProcessing media…",
+            )
+
+    return hook
+
+
+def send_thumbnail_preview(
+    chat_id: int,
+    thumbnail_url: str | None,
+    title: str,
+    size_bytes: int,
+) -> None:
+    if not thumbnail_url:
+        return
+
+    try:
+        parsed = urlparse(thumbnail_url)
+        if parsed.scheme not in {"http", "https"}:
+            return
+        bot.send_photo(
+            chat_id=chat_id,
+            photo=thumbnail_url,
+            caption=f"🎵 {clean_title(title)}\n📦 {human_bytes(size_bytes)}",
+            timeout=30,
+        )
+    except Exception:
+        logger.info("Thumbnail preview unavailable", exc_info=True)
+
+
+def upload_document_with_progress(
+    chat_id: int,
+    path: Path,
+    title: str,
+    user_id: int,
+    status_message_id: int,
+) -> None:
+    size = path.stat().st_size
+    filename = path.name
+    mime = "application/octet-stream"
+    if path.suffix.lower() == ".mp4":
+        mime = "video/mp4"
+    elif path.suffix.lower() in {".mp3", ".m4a", ".aac", ".ogg", ".opus"}:
+        mime = "audio/mpeg"
+
+    caption = (
+        f"✅ Done\n"
+        f"🎵 {clean_title(title, path.stem)}\n"
+        f"📦 {human_bytes(size)}"
+    )
+
+    api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+    last = {"time": 0.0}
+
+    with path.open("rb") as media:
+        encoder = MultipartEncoder(
+            fields={
+                "chat_id": str(chat_id),
+                "caption": caption[:1024],
+                "document": (filename, media, mime),
+            }
+        )
+
+        def on_upload(monitor):
+            now = time.time()
+            if monitor.len:
+                percent = max(
+                    0.0,
+                    min(100.0, monitor.bytes_read * 100.0 / monitor.len),
+                )
+            else:
+                percent = 0.0
+
+            detail = (
+                f"{percent:.1f}% • "
+                f"{human_bytes(min(monitor.bytes_read, monitor.len))} / "
+                f"{human_bytes(monitor.len)}"
+            )
+            set_job(user_id, "uploading", detail)
+
+            if (
+                now - last["time"] >= PROGRESS_UPDATE_SECONDS
+                or percent >= 99.5
+            ):
+                last["time"] = now
+                edit_status(
+                    chat_id,
+                    status_message_id,
+                    "⬆️ Uploading to Telegram\n" + detail,
+                )
+
+        monitor = MultipartEncoderMonitor(encoder, on_upload)
+
+        response = requests.post(
+            api_url,
+            data=monitor,
+            headers={"Content-Type": monitor.content_type},
+            timeout=(30, 600),
+        )
+
+    response.raise_for_status()
+    payload = response.json()
+    if not payload.get("ok"):
+        raise RuntimeError(
+            payload.get("description") or "Telegram upload failed."
+        )
+
+
 def format_selector() -> str:
     # Prefer MP4-friendly streams where available, then gracefully fall back.
     h = MAX_VIDEO_HEIGHT
@@ -260,7 +489,11 @@ def format_selector() -> str:
     )
 
 
-def ytdlp_download(url: str, job_dir: Path) -> Path:
+def ytdlp_download(
+    url: str,
+    job_dir: Path,
+    progress_hook=None,
+) -> dict:
     opts = {
         "format": format_selector(),
         "outtmpl": str(job_dir / "%(title).100B_[%(id)s].%(ext)s"),
@@ -278,18 +511,33 @@ def ytdlp_download(url: str, job_dir: Path) -> Path:
         "overwrites": True,
     }
 
+    if progress_hook:
+        opts["progress_hooks"] = [progress_hook]
+
     with YoutubeDL(opts) as ydl:
-        ydl.download([url])
+        info = ydl.extract_info(url, download=True)
 
     result = newest_media_file(job_dir)
     if not result:
         raise RuntimeError(
-            "yt-dlp finished but no media file was created."
+            "Download completed but no media file was created."
         )
-    return result
 
+    if isinstance(info, dict) and info.get("entries"):
+        entries = [entry for entry in info.get("entries") or [] if entry]
+        if entries:
+            info = entries[0]
 
-def ffmpeg_manifest_fallback(url: str, job_dir: Path) -> Path:
+    info = info if isinstance(info, dict) else {}
+
+    return {
+        "path": result,
+        "title": clean_title(info.get("title"), result.stem),
+        "thumbnail": info.get("thumbnail"),
+        "duration": info.get("duration"),
+    }
+
+def ffmpeg_manifest_fallback(url: str, job_dir: Path) -> dict:
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg is not installed in the container.")
 
@@ -322,14 +570,23 @@ def ffmpeg_manifest_fallback(url: str, job_dir: Path) -> Path:
     if not output.exists() or output.stat().st_size <= 0:
         raise RuntimeError("ffmpeg did not create a usable output file.")
 
-    return output
+    return {
+        "path": output,
+        "title": clean_title(Path(urlparse(url).path).stem, "stream"),
+        "thumbnail": None,
+        "duration": None,
+    }
 
 
-def download_media(url: str, job_dir: Path) -> Path:
+def download_media(
+    url: str,
+    job_dir: Path,
+    progress_hook=None,
+) -> dict:
     validate_public_http_url(url)
 
     try:
-        return ytdlp_download(url, job_dir)
+        return ytdlp_download(url, job_dir, progress_hook=progress_hook)
     except DownloadError as first_error:
         # Direct public HLS/DASH/ISM can sometimes work better through ffmpeg.
         if manifest_kind(url):
@@ -359,7 +616,7 @@ def cmd_start(message):
         "DDownloader Render Bot ✅\n\n"
         "Send one media URL.\n\n"
         "Commands:\n"
-        "/status - current download status\n"
+        "/status - live download/upload progress\n"
         "/whoami - show your Telegram user ID\n"
         "/help - show this help\n\n"
         f"Max video height: {MAX_VIDEO_HEIGHT}p\n"
@@ -478,10 +735,22 @@ def handle_url(message):
                 pass
 
             bot.send_chat_action(message.chat.id, "typing")
-            result = download_media(url, job_dir)
+            progress_hook = make_download_progress_hook(
+                user_id,
+                message.chat.id,
+                status_msg.message_id,
+            )
+            media_info = download_media(
+                url,
+                job_dir,
+                progress_hook=progress_hook,
+            )
+            result = media_info["path"]
 
         size = result.stat().st_size
         size_mb = size / (1024 * 1024)
+        title = media_info.get("title") or result.stem
+        thumbnail = media_info.get("thumbnail")
 
         if size > MAX_UPLOAD_BYTES:
             set_job(
@@ -498,29 +767,40 @@ def handle_url(message):
             )
             return
 
-        set_job(user_id, "uploading", f"{size_mb:.1f} MB")
+        set_job(
+            user_id,
+            "uploading",
+            f"0.0% • {human_bytes(size)}",
+        )
 
-        try:
-            bot.edit_message_text(
-                f"Uploading… ({size_mb:.1f} MB)",
-                chat_id=message.chat.id,
-                message_id=status_msg.message_id,
-            )
-        except Exception:
-            pass
+        send_thumbnail_preview(
+            message.chat.id,
+            thumbnail,
+            title,
+            size,
+        )
+
+        edit_status(
+            message.chat.id,
+            status_msg.message_id,
+            f"⬆️ Uploading to Telegram\n0.0% • {human_bytes(size)}",
+        )
 
         bot.send_chat_action(message.chat.id, "upload_document")
 
-        with result.open("rb") as media:
-            bot.send_document(
-                chat_id=message.chat.id,
-                document=media,
-                visible_file_name=result.name,
-                caption="Done ✅",
-                timeout=600,
-            )
+        upload_document_with_progress(
+            chat_id=message.chat.id,
+            path=result,
+            title=title,
+            user_id=user_id,
+            status_message_id=status_msg.message_id,
+        )
 
-        set_job(user_id, "done", result.name)
+        set_job(
+            user_id,
+            "done",
+            f"{clean_title(title)} • {human_bytes(size)}",
+        )
 
         try:
             bot.delete_message(
@@ -587,6 +867,7 @@ def index():
         ffmpeg=bool(shutil.which("ffmpeg")),
         max_upload_mb=MAX_UPLOAD_MB,
         max_video_height=MAX_VIDEO_HEIGHT,
+        progress_update_seconds=PROGRESS_UPDATE_SECONDS,
     )
 
 
