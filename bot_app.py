@@ -18,6 +18,7 @@ from urllib.parse import urljoin, urlparse
 from flask import Flask, jsonify, request
 import requests
 import telebot
+from telebot import apihelper
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 from yt_dlp import YoutubeDL
@@ -31,7 +32,28 @@ from yt_dlp.utils import DownloadError
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 PORT = int(os.getenv("PORT", "10000"))
 
-MAX_UPLOAD_MB = max(1, int(os.getenv("MAX_UPLOAD_MB", "49")))
+TELEGRAM_API_BASE_URL = os.getenv(
+    "TELEGRAM_API_BASE_URL",
+    "https://api.telegram.org",
+).strip().rstrip("/")
+
+OFFICIAL_TELEGRAM_API = (
+    TELEGRAM_API_BASE_URL.lower() == "https://api.telegram.org"
+)
+
+REQUESTED_MAX_UPLOAD_MB = max(
+    1,
+    int(os.getenv("MAX_UPLOAD_MB", "100")),
+)
+
+# The hosted Telegram Bot API only accepts bot uploads up to ~50 MB.
+# A Local Bot API Server can accept much larger uploads. Keep the hosted API
+# safely below its ceiling, while honoring the configured limit in local mode.
+MAX_UPLOAD_MB = (
+    min(REQUESTED_MAX_UPLOAD_MB, 49)
+    if OFFICIAL_TELEGRAM_API
+    else REQUESTED_MAX_UPLOAD_MB
+)
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 MAX_VIDEO_HEIGHT = max(144, int(os.getenv("MAX_VIDEO_HEIGHT", "1080")))
@@ -83,6 +105,13 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("DDownloaderRender")
+
+apihelper.API_URL = (
+    TELEGRAM_API_BASE_URL + "/bot{0}/{1}"
+)
+apihelper.FILE_URL = (
+    TELEGRAM_API_BASE_URL + "/file/bot{0}/{1}"
+)
 
 bot = telebot.TeleBot(
     BOT_TOKEN,
@@ -758,7 +787,9 @@ def upload_document_with_progress(
         f"📦 {human_bytes(size)}"
     )
 
-    api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
+    api_url = (
+        f"{TELEGRAM_API_BASE_URL}/bot{BOT_TOKEN}/sendDocument"
+    )
     last = {"time": 0.0}
 
     with path.open("rb") as media:
@@ -1333,8 +1364,11 @@ def cmd_start(message):
         "/inspect <url> - inspect manifest/DRM markers\n"
         "/help - show this help\n\n"
         f"Max video height: {MAX_VIDEO_HEIGHT}p\n"
-        f"Configured Telegram upload limit: {MAX_UPLOAD_MB} MB\n\n"
-        "Large audio files are compressed when possible. "
+        f"Configured Telegram upload limit: {MAX_UPLOAD_MB} MB\n"
+        f"Telegram API mode: "
+        f"{'official' if OFFICIAL_TELEGRAM_API else 'local/custom'}\n\n"
+        "Large audio files are compressed only when they exceed the "
+        "active upload limit. "
         "DRM keys/decryption and protection bypass are not supported."
     )
     bot.reply_to(
@@ -1916,6 +1950,10 @@ def index():
         webhook=True,
         ffmpeg=bool(shutil.which("ffmpeg")),
         max_upload_mb=MAX_UPLOAD_MB,
+        requested_max_upload_mb=REQUESTED_MAX_UPLOAD_MB,
+        telegram_api_mode=(
+            "official" if OFFICIAL_TELEGRAM_API else "local/custom"
+        ),
         max_video_height=MAX_VIDEO_HEIGHT,
         progress_update_seconds=PROGRESS_UPDATE_SECONDS,
     )
