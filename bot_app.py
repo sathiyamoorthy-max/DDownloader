@@ -1,5 +1,6 @@
 import hashlib
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -11,7 +12,8 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from urllib.parse import urlparse
+from html.parser import HTMLParser
+from urllib.parse import urljoin, urlparse
 
 from flask import Flask, jsonify, request
 import requests
@@ -189,6 +191,182 @@ def validate_public_http_url(url: str) -> None:
             raise ValueError("Local/private network URLs are not allowed.")
 
 
+class PublicMediaHTMLParser(HTMLParser):
+    def __init__(self, base_url: str):
+        super().__init__()
+        self.base_url = base_url
+        self.candidates = []
+        self.title = None
+        self._in_title = False
+        self._title_parts = []
+
+    def _add(self, value):
+        if not value:
+            return
+        value = value.strip()
+        if not value:
+            return
+        absolute = urljoin(self.base_url, value)
+        if absolute.startswith(("http://", "https://")):
+            self.candidates.append(absolute)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        lower_tag = tag.lower()
+
+        if lower_tag == "title":
+            self._in_title = True
+
+        if lower_tag in {"audio", "video", "source"}:
+            self._add(attrs.get("src"))
+
+        if lower_tag == "meta":
+            key = (
+                attrs.get("property")
+                or attrs.get("name")
+                or ""
+            ).lower()
+            if key in {
+                "og:audio",
+                "og:audio:url",
+                "og:audio:secure_url",
+                "og:video",
+                "og:video:url",
+                "og:video:secure_url",
+                "twitter:player:stream",
+            }:
+                self._add(attrs.get("content"))
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "title":
+            self._in_title = False
+            if self._title_parts:
+                self.title = clean_title(
+                    " ".join(self._title_parts),
+                    "media",
+                )
+
+    def handle_data(self, data):
+        if self._in_title:
+            self._title_parts.append(data)
+
+
+def _collect_jsonld_media(value, found):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {
+                "contentUrl",
+                "embedUrl",
+                "uploadUrl",
+            } and isinstance(item, str):
+                found.append(item)
+            else:
+                _collect_jsonld_media(item, found)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_jsonld_media(item, found)
+
+
+def extract_public_media_candidates(page_url: str) -> dict:
+    """
+    Inspect only the publicly returned webpage HTML for openly exposed media
+    URLs. This does not log in, use cookies, call private APIs, obtain keys,
+    or decrypt protected streams.
+    """
+    validate_public_http_url(page_url)
+
+    response = requests.get(
+        page_url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 13) "
+                "AppleWebKit/537.36 Chrome/124 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml",
+        },
+        timeout=30,
+        allow_redirects=True,
+    )
+    response.raise_for_status()
+
+    content_type = response.headers.get("Content-Type", "").lower()
+    if "html" not in content_type and "xhtml" not in content_type:
+        return {
+            "title": clean_title(
+                Path(urlparse(response.url).path).stem,
+                "media",
+            ),
+            "candidates": [response.url],
+        }
+
+    html = response.text
+    parser = PublicMediaHTMLParser(response.url)
+    parser.feed(html)
+
+    jsonld_urls = []
+    for match in re.finditer(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        html,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        raw = match.group(1).strip()
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+            _collect_jsonld_media(payload, jsonld_urls)
+        except Exception:
+            continue
+
+    candidates = []
+    seen = set()
+
+    for raw_url in parser.candidates + jsonld_urls:
+        candidate = urljoin(response.url, raw_url)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+
+        try:
+            validate_public_http_url(candidate)
+        except Exception:
+            continue
+
+        lower_path = urlparse(candidate).path.lower()
+        if (
+            re.search(r"\.(?:mp3|m4a|aac|ogg|opus|wav|mp4|mkv|webm|mov)(?:$|[?#])", candidate, re.I)
+            or ".m3u8" in lower_path
+            or ".mpd" in lower_path
+            or ".ism" in lower_path
+        ):
+            candidates.append(candidate)
+
+    return {
+        "title": parser.title or clean_title(
+            Path(urlparse(response.url).path).stem,
+            "media",
+        ),
+        "candidates": candidates[:20],
+    }
+
+
+def download_public_candidate(
+    candidate: str,
+    job_dir: Path,
+    progress_hook=None,
+) -> dict:
+    kind = manifest_kind(candidate)
+    if kind:
+        result = ffmpeg_manifest_fallback(candidate, job_dir)
+        return result
+
+    return ytdlp_download(
+        candidate,
+        job_dir,
+        progress_hook=progress_hook,
+    )
+
+
 def manifest_kind(url: str):
     lower = url.lower()
     if re.search(r"\.m3u8(?:$|[?#])", lower):
@@ -231,9 +409,10 @@ def safe_error(exc: Exception) -> str:
 
     if "unsupported url" in lower:
         return (
-            "This website/page is not supported by the downloader. "
-            "Try a direct public media URL (.mp3/.m4a/.mp4/.m3u8/.mpd) "
-            "or another supported public source."
+            "The normal extractor does not support this page. "
+            "Public webpage media fallbacks were also attempted. "
+            "If no openly exposed media URL exists, the source may require "
+            "login, authorization, or protection handling."
         )
 
     if "http error 403" in lower or "forbidden" in lower:
@@ -585,17 +764,73 @@ def download_media(
 ) -> dict:
     validate_public_http_url(url)
 
+    first_error = None
+
+    # 1) Normal yt-dlp extractor/generic downloader.
     try:
-        return ytdlp_download(url, job_dir, progress_hook=progress_hook)
-    except DownloadError as first_error:
-        # Direct public HLS/DASH/ISM can sometimes work better through ffmpeg.
-        if manifest_kind(url):
-            logger.warning(
-                "yt-dlp failed for manifest, trying ffmpeg fallback: %s",
-                first_error,
-            )
+        return ytdlp_download(
+            url,
+            job_dir,
+            progress_hook=progress_hook,
+        )
+    except Exception as exc:
+        first_error = exc
+        logger.warning(
+            "Primary downloader failed; trying public fallbacks: %s",
+            exc,
+        )
+
+    # 2) Direct manifest fallback through ffmpeg.
+    if manifest_kind(url):
+        try:
             return ffmpeg_manifest_fallback(url, job_dir)
-        raise
+        except Exception as exc:
+            first_error = exc
+
+    # 3) Public webpage metadata/HTML fallback. Only media URLs already
+    #    exposed in the public page response are considered.
+    try:
+        page = extract_public_media_candidates(url)
+        candidates = page.get("candidates") or []
+
+        for index, candidate in enumerate(candidates, start=1):
+            logger.info(
+                "Trying public media candidate %s/%s: %s",
+                index,
+                len(candidates),
+                candidate,
+            )
+            try:
+                result = download_public_candidate(
+                    candidate,
+                    job_dir,
+                    progress_hook=progress_hook,
+                )
+                if not result.get("title") or result.get("title") == "media":
+                    result["title"] = page.get("title") or result.get("title")
+                return result
+            except Exception as candidate_error:
+                logger.warning(
+                    "Public candidate failed: %s",
+                    candidate_error,
+                )
+                continue
+
+        if not candidates:
+            raise RuntimeError(
+                "No public direct media URL was exposed by this webpage."
+            )
+    except Exception as fallback_error:
+        logger.warning(
+            "Public webpage fallback failed: %s",
+            fallback_error,
+        )
+
+    raise RuntimeError(
+        "The page could not be downloaded as public media. "
+        "It may be unsupported, private, authenticated, expired, or protected. "
+        f"Original downloader error: {safe_error(first_error)}"
+    )
 
 
 def cleanup_job(job_dir: Path):
@@ -621,7 +856,9 @@ def cmd_start(message):
         "/help - show this help\n\n"
         f"Max video height: {MAX_VIDEO_HEIGHT}p\n"
         f"Configured Telegram upload limit: {MAX_UPLOAD_MB} MB\n\n"
-        "Public/authorized media only. DRM keys/decryption are not supported."
+        "Public/authorized media only. The bot also checks public webpage "
+        "metadata for openly exposed direct media URLs. "
+        "Login/private/DRM streams and decryption are not supported."
     )
     bot.reply_to(message, text)
 
@@ -686,17 +923,6 @@ def handle_url(message):
     url = extract_url(message.text or "")
     if not url:
         bot.reply_to(message, "Send a valid http/https media URL.")
-        return
-
-    host = (urlparse(url).hostname or "").lower()
-    if host == "pocketfm.com" or host.endswith(".pocketfm.com"):
-        bot.reply_to(
-            message,
-            "Pocket FM page links cannot be downloaded by this bot. "
-            "Pocket FM currently provides offline downloads inside its own app. "
-            "If you have a direct public media URL (.mp3/.m4a/.mp4/.m3u8/.mpd), "
-            "send that URL instead."
-        )
         return
 
     try:
