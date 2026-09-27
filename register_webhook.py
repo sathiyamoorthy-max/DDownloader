@@ -8,6 +8,10 @@ import requests
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+TELEGRAM_API_BASE_URL = os.getenv(
+    "TELEGRAM_API_BASE_URL",
+    "https://api.telegram.org",
+).strip().rstrip("/")
 
 if not BOT_TOKEN:
     raise SystemExit("TELEGRAM_BOT_TOKEN is missing.")
@@ -22,7 +26,9 @@ secret = hashlib.sha256(
 ).hexdigest()
 
 webhook_url = f"{RENDER_EXTERNAL_URL}/telegram/{secret}"
-api = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
+api = (
+    f"{TELEGRAM_API_BASE_URL}/bot{BOT_TOKEN}/setWebhook"
+)
 
 payload = {
     "url": webhook_url,
@@ -44,6 +50,7 @@ for attempt in range(1, 6):
 
         print("Telegram webhook configured.")
         print("Render URL:", RENDER_EXTERNAL_URL)
+        print("Telegram API base:", TELEGRAM_API_BASE_URL)
         sys.exit(0)
 
     except Exception as exc:
