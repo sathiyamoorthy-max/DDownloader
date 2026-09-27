@@ -1,0 +1,54 @@
+import hashlib
+import os
+import sys
+import time
+
+import requests
+
+
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+
+if not BOT_TOKEN:
+    raise SystemExit("TELEGRAM_BOT_TOKEN is missing.")
+
+if not RENDER_EXTERNAL_URL:
+    raise SystemExit(
+        "RENDER_EXTERNAL_URL is missing. This must run as a Render Web Service."
+    )
+
+secret = hashlib.sha256(
+    ("ddownloader-render:" + BOT_TOKEN).encode("utf-8")
+).hexdigest()
+
+webhook_url = f"{RENDER_EXTERNAL_URL}/telegram/{secret}"
+api = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
+
+payload = {
+    "url": webhook_url,
+    "secret_token": secret,
+    "drop_pending_updates": True,
+    "allowed_updates": ["message"],
+}
+
+last_error = None
+
+for attempt in range(1, 6):
+    try:
+        response = requests.post(api, json=payload, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+
+        if not data.get("ok"):
+            raise RuntimeError(str(data))
+
+        print("Telegram webhook configured.")
+        print("Render URL:", RENDER_EXTERNAL_URL)
+        sys.exit(0)
+
+    except Exception as exc:
+        last_error = exc
+        print(f"Webhook setup attempt {attempt}/5 failed: {exc}")
+        time.sleep(min(2 ** attempt, 15))
+
+raise SystemExit(f"Unable to configure Telegram webhook: {last_error}")
