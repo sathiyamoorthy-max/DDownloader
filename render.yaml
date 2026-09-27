@@ -27,3 +27,15 @@ services:
 
       - key: LOG_LEVEL
         value: "INFO"
+
+      - key: AUTH_DOMAINS
+        sync: false
+
+      - key: AUTH_COOKIE
+        sync: false
+
+      - key: AUTHORIZATION_HEADER
+        sync: false
+
+      - key: AUTH_REFERER
+        sync: false
