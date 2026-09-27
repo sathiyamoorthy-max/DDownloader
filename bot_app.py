@@ -18,6 +18,7 @@ from urllib.parse import urljoin, urlparse
 from flask import Flask, jsonify, request
 import requests
 import telebot
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
@@ -106,6 +107,10 @@ _update_pool = ThreadPoolExecutor(max_workers=8)
 _jobs_guard = threading.Lock()
 _jobs = {}
 
+# PocketFM public show selection state.
+_pocket_states_guard = threading.Lock()
+_pocket_states = {}
+
 # Per-user basic rate limit.
 _rate_guard = threading.Lock()
 _last_request_at = {}
@@ -116,6 +121,22 @@ URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 # ============================================================
 # Utility helpers
 # ============================================================
+
+def get_main_menu():
+    markup = ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+    markup.row(
+        KeyboardButton("📥 Media URL"),
+        KeyboardButton("🔍 PocketFM Series"),
+    )
+    markup.row(
+        KeyboardButton("📊 Status"),
+        KeyboardButton("ℹ️ Help"),
+    )
+    return markup
+
 
 def allowed_user(message) -> bool:
     if not ALLOWED_USER_IDS:
@@ -474,8 +495,27 @@ def download_public_candidate(
 ) -> dict:
     kind = manifest_kind(candidate)
     if kind:
-        result = ffmpeg_manifest_fallback(candidate, job_dir)
-        return result
+        # Inspect the manifest before handing it to ffmpeg. Protected
+        # manifests are reported, not decrypted.
+        try:
+            response = fetch_for_inspection(candidate)
+            if response.status_code == 200:
+                drm = detect_drm_markers(response.text[:2_000_000])
+                if drm:
+                    raise RuntimeError(
+                        "DRM/protected manifest detected: "
+                        + ", ".join(drm)
+                    )
+        except RuntimeError:
+            raise
+        except Exception:
+            logger.info(
+                "Manifest pre-inspection unavailable; continuing normal "
+                "non-decrypting download attempt.",
+                exc_info=True,
+            )
+
+        return ffmpeg_manifest_fallback(candidate, job_dir)
 
     return ytdlp_download(
         candidate,
@@ -874,6 +914,216 @@ def ffmpeg_manifest_fallback(url: str, job_dir: Path) -> dict:
     }
 
 
+def is_pocketfm_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host == "pocketfm.com" or host.endswith(".pocketfm.com")
+
+
+def pocketfm_public_page_info(url: str) -> dict:
+    """
+    Extract metadata and openly exposed media links from the public PocketFM
+    webpage. No private API, key extraction, or decryption is used here.
+    """
+    validate_public_http_url(url)
+
+    response = requests.get(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 13) "
+                "AppleWebKit/537.36 Chrome/124 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml",
+            "Referer": "https://www.pocketfm.com/",
+        },
+        timeout=30,
+        allow_redirects=True,
+    )
+    response.raise_for_status()
+
+    html = response.text
+    normalized = (
+        html.replace("\\/", "/")
+        .replace("\\u0026", "&")
+        .replace("&amp;", "&")
+    )
+
+    def meta_value(name):
+        patterns = [
+            rf'<meta[^>]+property=["\']{re.escape(name)}["\'][^>]+content=["\']([^"\']+)',
+            rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']{re.escape(name)}["\']',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, normalized, re.I)
+            if match:
+                return match.group(1).strip()
+        return None
+
+    title = meta_value("og:title") or clean_title(
+        Path(urlparse(response.url).path).stem,
+        "Pocket FM",
+    )
+    thumbnail = meta_value("og:image")
+
+    raw_candidates = re.findall(
+        r'https?://[^\s"\'<>]+?\.(?:m3u8|mp3|m4a|aac|mp4)(?:\?[^\s"\'<>]*)?',
+        normalized,
+        flags=re.I,
+    )
+
+    candidates = []
+    seen = set()
+    for candidate in raw_candidates:
+        candidate = candidate.rstrip(").,]}>")
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            validate_public_http_url(candidate)
+        except Exception:
+            continue
+        candidates.append(candidate)
+
+    return {
+        "title": clean_title(title, "Pocket FM"),
+        "thumbnail": thumbnail,
+        "candidates": candidates[:20],
+        "final_url": response.url,
+    }
+
+
+def pocketfm_public_download(
+    url: str,
+    job_dir: Path,
+    progress_hook=None,
+) -> dict:
+    page = pocketfm_public_page_info(url)
+    last_error = None
+
+    for candidate in page.get("candidates") or []:
+        try:
+            result = download_public_candidate(
+                candidate,
+                job_dir,
+                progress_hook=progress_hook,
+            )
+            result["title"] = page.get("title") or result.get("title")
+            result["thumbnail"] = (
+                page.get("thumbnail")
+                or result.get("thumbnail")
+            )
+            return result
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "PocketFM public candidate failed: %s",
+                exc,
+            )
+
+    if last_error:
+        raise RuntimeError(safe_error(last_error))
+
+    raise RuntimeError(
+        "PocketFM page did not expose a public direct media URL."
+    )
+
+
+def pocketfm_public_show_links(url: str) -> tuple[str, list[str]]:
+    validate_public_http_url(url)
+
+    response = requests.get(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 13) "
+                "AppleWebKit/537.36 Chrome/124 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml",
+            "Referer": "https://www.pocketfm.com/",
+        },
+        timeout=30,
+        allow_redirects=True,
+    )
+    response.raise_for_status()
+
+    html = response.text.replace("\\/", "/")
+
+    title_match = re.search(
+        r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)',
+        html,
+        re.I,
+    )
+    title = (
+        clean_title(title_match.group(1), "Pocket FM Series")
+        if title_match
+        else "Pocket FM Series"
+    )
+
+    matches = re.findall(
+        r'(?:https?://(?:www\.)?pocketfm\.com)?/episode/[A-Za-z0-9_-]+(?:\?[^\s"\'<>]*)?',
+        html,
+        flags=re.I,
+    )
+
+    links = []
+    seen = set()
+    for item in matches:
+        link = (
+            item
+            if item.startswith("http")
+            else urljoin(response.url, item)
+        )
+        if link not in seen:
+            seen.add(link)
+            links.append(link)
+
+    return title, links[:500]
+
+
+def maybe_compress_audio_for_upload(
+    path: Path,
+    job_dir: Path,
+) -> Path:
+    if path.stat().st_size <= MAX_UPLOAD_BYTES:
+        return path
+
+    if path.suffix.lower() not in {
+        ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav"
+    }:
+        return path
+
+    if shutil.which("ffmpeg") is None:
+        return path
+
+    output = job_dir / f"{path.stem}_compressed.mp3"
+    completed = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-y",
+            "-i", str(path),
+            "-vn",
+            "-b:a", "64k",
+            str(output),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=60 * 60,
+    )
+
+    if (
+        completed.returncode == 0
+        and output.exists()
+        and output.stat().st_size > 0
+        and output.stat().st_size < path.stat().st_size
+    ):
+        return output
+
+    return path
+
+
 def download_media(
     url: str,
     job_dir: Path,
@@ -882,6 +1132,20 @@ def download_media(
     validate_public_http_url(url)
 
     first_error = None
+
+    if is_pocketfm_url(url) and "/episode/" in urlparse(url).path.lower():
+        try:
+            return pocketfm_public_download(
+                url,
+                job_dir,
+                progress_hook=progress_hook,
+            )
+        except Exception as exc:
+            first_error = exc
+            logger.warning(
+                "PocketFM public extractor failed; trying generic flow: %s",
+                exc,
+            )
 
     # 1) Normal yt-dlp extractor/generic downloader.
     try:
@@ -965,8 +1229,10 @@ def cmd_start(message):
         return
 
     text = (
-        "DDownloader Render Bot ✅\n\n"
-        "Send one media URL.\n\n"
+        "DDownloader + PocketFM Bot ✅\n\n"
+        "Send a public/authorized media URL. PocketFM episode links are "
+        "checked with the PocketFM public-page extractor first, then the "
+        "general downloader fallback.\n\n"
         "Commands:\n"
         "/status - live download/upload progress\n"
         "/whoami - show your Telegram user ID\n"
@@ -974,11 +1240,14 @@ def cmd_start(message):
         "/help - show this help\n\n"
         f"Max video height: {MAX_VIDEO_HEIGHT}p\n"
         f"Configured Telegram upload limit: {MAX_UPLOAD_MB} MB\n\n"
-        "Public/authorized media only. The bot also checks public webpage "
-        "metadata for openly exposed direct media URLs. "
-        "Login/private/DRM streams and decryption are not supported."
+        "Large audio files are compressed when possible. "
+        "DRM keys/decryption and protection bypass are not supported."
     )
-    bot.reply_to(message, text)
+    bot.reply_to(
+        message,
+        text,
+        reply_markup=get_main_menu(),
+    )
 
 
 @bot.message_handler(commands=["whoami"])
@@ -1079,82 +1348,193 @@ def cmd_status(message):
 
 
 # ============================================================
-# URL handler
+# PocketFM UI + download handlers
 # ============================================================
+
+@bot.message_handler(func=lambda message: message.text == "📥 Media URL")
+def button_media_url(message):
+    bot.reply_to(
+        message,
+        "Send one media URL, or multiple PocketFM /episode/ links "
+        "on separate lines.",
+    )
+
+
+@bot.message_handler(func=lambda message: message.text == "🔍 PocketFM Series")
+def button_pocket_series(message):
+    bot.reply_to(
+        message,
+        "Send a public PocketFM /show/ link. If episode links are visible "
+        "on the public page, I will let you choose a single episode or range.",
+    )
+
+
+@bot.message_handler(func=lambda message: message.text == "📊 Status")
+def button_status(message):
+    cmd_status(message)
+
+
+@bot.message_handler(func=lambda message: message.text == "ℹ️ Help")
+def button_help(message):
+    cmd_start(message)
+
 
 @bot.message_handler(
     func=lambda message: bool(message.text)
-    and not message.text.startswith("/")
+    and "pocketfm.com/show/" in message.text.lower()
 )
-def handle_url(message):
-    if not allowed_user(message):
-        bot.reply_to(message, "This bot is private.")
-        return
-
-    if not message.from_user:
-        return
-
-    user_id = message.from_user.id
-
-    if rate_limited(user_id):
-        bot.reply_to(
-            message,
-            f"Please wait {RATE_LIMIT_SECONDS} seconds before another request."
-        )
+def handle_pocket_show(message):
+    if not allowed_user(message) or not message.from_user:
         return
 
     url = extract_url(message.text or "")
     if not url:
-        bot.reply_to(message, "Send a valid http/https media URL.")
+        bot.reply_to(message, "Send a valid PocketFM show URL.")
         return
+
+    status_message = bot.reply_to(
+        message,
+        "🔍 Reading public series page…",
+    )
 
     try:
-        validate_public_http_url(url)
+        title, links = pocketfm_public_show_links(url)
+        if not links:
+            edit_status(
+                message.chat.id,
+                status_message.message_id,
+                "No public episode links were visible on this show page. "
+                "You can still send individual public episode URLs.",
+            )
+            return
+
+        with _pocket_states_guard:
+            _pocket_states[message.from_user.id] = {
+                "title": title,
+                "links": links,
+                "created": time.time(),
+            }
+
+        edit_status(
+            message.chat.id,
+            status_message.message_id,
+            f"🎧 {title}\n"
+            f"Public episode links found: {len(links)}\n\n"
+            "Send one number, for example: 7\n"
+            "Or a range: 1 15",
+        )
+        bot.register_next_step_handler(
+            status_message,
+            process_pocket_range,
+        )
     except Exception as exc:
-        bot.reply_to(message, safe_error(exc))
+        edit_status(
+            message.chat.id,
+            status_message.message_id,
+            "Series read failed.\n\n" + safe_error(exc),
+        )
+
+
+def process_pocket_range(message):
+    if not allowed_user(message) or not message.from_user:
         return
 
-    lock = user_lock(user_id)
-    if not lock.acquire(blocking=False):
+    user_id = message.from_user.id
+    with _pocket_states_guard:
+        state = dict(_pocket_states.get(user_id, {}))
+
+    links = state.get("links") or []
+    if not links:
         bot.reply_to(
             message,
-            "You already have a download running. Use /status."
+            "Series selection expired. Send the /show/ link again.",
         )
         return
 
+    try:
+        numbers = (message.text or "").strip().split()
+        if len(numbers) == 1:
+            start = end = int(numbers[0])
+        elif len(numbers) == 2:
+            start, end = map(int, numbers)
+        else:
+            raise ValueError
+
+        start = max(1, start)
+        end = min(len(links), end)
+        if end < start:
+            raise ValueError
+
+        selected = links[start - 1:end]
+    except ValueError:
+        bot.reply_to(
+            message,
+            "Use a number like 7, or a range like 1 15.",
+        )
+        return
+
+    with _pocket_states_guard:
+        _pocket_states.pop(user_id, None)
+
+    process_url_batch(
+        message,
+        selected,
+        batch_label=f"PocketFM episodes {start}-{end}",
+    )
+
+
+def process_one_url(
+    message,
+    url: str,
+    user_id: int,
+    sequence_text: str = "",
+) -> bool:
     job_id = f"{user_id}_{message.message_id}_{uuid.uuid4().hex[:8]}"
     job_dir = DOWNLOAD_ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    status_msg = None
+    prefix = f"{sequence_text}\n" if sequence_text else ""
+    status_msg = bot.reply_to(
+        message,
+        prefix + "Waiting for download slot…",
+    )
 
     try:
-        set_job(user_id, "waiting", "Waiting for a download slot…")
-        status_msg = bot.reply_to(message, "Waiting for download slot…")
+        set_job(
+            user_id,
+            "waiting",
+            sequence_text or "Waiting for a download slot…",
+        )
 
         with _download_slots:
-            set_job(user_id, "downloading", "Downloading media…")
-            try:
-                bot.edit_message_text(
-                    "Downloading…",
-                    chat_id=message.chat.id,
-                    message_id=status_msg.message_id,
-                )
-            except Exception:
-                pass
+            set_job(
+                user_id,
+                "downloading",
+                sequence_text or "Downloading media…",
+            )
+            edit_status(
+                message.chat.id,
+                status_msg.message_id,
+                prefix + "Downloading…",
+            )
 
-            bot.send_chat_action(message.chat.id, "typing")
             progress_hook = make_download_progress_hook(
                 user_id,
                 message.chat.id,
                 status_msg.message_id,
             )
+
             media_info = download_media(
                 url,
                 job_dir,
                 progress_hook=progress_hook,
             )
             result = media_info["path"]
+
+        result = maybe_compress_audio_for_upload(
+            result,
+            job_dir,
+        )
 
         size = result.stat().st_size
         size_mb = size / (1024 * 1024)
@@ -1167,14 +1547,14 @@ def handle_url(message):
                 "too_large",
                 f"{size_mb:.1f} MB > {MAX_UPLOAD_MB} MB",
             )
-            bot.edit_message_text(
-                f"Downloaded successfully: {size_mb:.1f} MB\n"
-                f"But it is above this bot's configured upload limit "
-                f"({MAX_UPLOAD_MB} MB), so it was not uploaded.",
-                chat_id=message.chat.id,
-                message_id=status_msg.message_id,
+            edit_status(
+                message.chat.id,
+                status_msg.message_id,
+                f"{prefix}Downloaded: {size_mb:.1f} MB\n"
+                f"Still above the configured upload limit "
+                f"({MAX_UPLOAD_MB} MB).",
             )
-            return
+            return False
 
         set_job(
             user_id,
@@ -1192,10 +1572,14 @@ def handle_url(message):
         edit_status(
             message.chat.id,
             status_msg.message_id,
-            f"⬆️ Uploading to Telegram\n0.0% • {human_bytes(size)}",
+            f"{prefix}⬆️ Uploading to Telegram\n"
+            f"0.0% • {human_bytes(size)}",
         )
 
-        bot.send_chat_action(message.chat.id, "upload_document")
+        bot.send_chat_action(
+            message.chat.id,
+            "upload_document",
+        )
 
         upload_document_with_progress(
             chat_id=message.chat.id,
@@ -1219,38 +1603,83 @@ def handle_url(message):
         except Exception:
             pass
 
+        return True
+
     except subprocess.TimeoutExpired:
         set_job(user_id, "failed", "Download timed out.")
-        if status_msg:
-            bot.edit_message_text(
-                "Download timed out.",
-                chat_id=message.chat.id,
-                message_id=status_msg.message_id,
-            )
+        edit_status(
+            message.chat.id,
+            status_msg.message_id,
+            prefix + "Download timed out.",
+        )
+        return False
 
     except Exception as exc:
-        logger.exception("Download failed for user %s", user_id)
-        message_text = safe_error(exc)
-        set_job(user_id, "failed", message_text)
-
-        if status_msg:
-            try:
-                bot.edit_message_text(
-                    "Download failed.\n\n" + message_text,
-                    chat_id=message.chat.id,
-                    message_id=status_msg.message_id,
-                )
-            except Exception:
-                bot.reply_to(
-                    message,
-                    "Download failed.\n\n" + message_text,
-                )
-        else:
-            bot.reply_to(message, "Download failed.\n\n" + message_text)
+        logger.exception(
+            "Download failed for user %s",
+            user_id,
+        )
+        error_text = safe_error(exc)
+        set_job(user_id, "failed", error_text)
+        edit_status(
+            message.chat.id,
+            status_msg.message_id,
+            prefix + "Download failed.\n\n" + error_text,
+        )
+        return False
 
     finally:
         cleanup_job(job_dir)
-        # Keep the status briefly for /status, then remove it.
+
+
+def process_url_batch(
+    message,
+    urls: list[str],
+    batch_label: str = "",
+):
+    if not message.from_user:
+        return
+
+    user_id = message.from_user.id
+    lock = user_lock(user_id)
+
+    if not lock.acquire(blocking=False):
+        bot.reply_to(
+            message,
+            "You already have a download running. Use /status.",
+        )
+        return
+
+    try:
+        total = len(urls)
+        success = 0
+
+        for index, url in enumerate(urls, start=1):
+            sequence = (
+                f"{batch_label} ({index}/{total})"
+                if batch_label
+                else (
+                    f"Item {index}/{total}"
+                    if total > 1
+                    else ""
+                )
+            )
+
+            if process_one_url(
+                message,
+                url,
+                user_id,
+                sequence_text=sequence,
+            ):
+                success += 1
+
+        if total > 1:
+            bot.reply_to(
+                message,
+                f"Batch complete ✅\n"
+                f"Successful: {success}/{total}",
+            )
+    finally:
         def expire_status():
             time.sleep(60)
             clear_job(user_id)
@@ -1261,6 +1690,77 @@ def handle_url(message):
         ).start()
 
         lock.release()
+
+
+# ============================================================
+# General URL handler
+# ============================================================
+
+@bot.message_handler(
+    func=lambda message: bool(message.text)
+    and not message.text.startswith("/")
+)
+def handle_url(message):
+    if not allowed_user(message):
+        bot.reply_to(message, "This bot is private.")
+        return
+
+    if not message.from_user:
+        return
+
+    user_id = message.from_user.id
+
+    if rate_limited(user_id):
+        bot.reply_to(
+            message,
+            f"Please wait {RATE_LIMIT_SECONDS} seconds before another request.",
+        )
+        return
+
+    raw_urls = URL_RE.findall(message.text or "")
+    urls = []
+    seen = set()
+
+    for raw in raw_urls:
+        url = raw.rstrip(").,]}>\"'")
+        if url in seen:
+            continue
+        seen.add(url)
+
+        try:
+            validate_public_http_url(url)
+        except Exception:
+            continue
+
+        urls.append(url)
+
+    if not urls:
+        bot.reply_to(
+            message,
+            "Send a valid http/https media URL.",
+        )
+        return
+
+    # Multiple URLs are accepted only as a bounded batch. This especially
+    # preserves the PocketFM multi-episode workflow from the merged bot.
+    urls = urls[:20]
+
+    label = (
+        "PocketFM episodes"
+        if len(urls) > 1
+        and all(
+            is_pocketfm_url(url)
+            and "/episode/" in urlparse(url).path.lower()
+            for url in urls
+        )
+        else ""
+    )
+
+    process_url_batch(
+        message,
+        urls,
+        batch_label=label,
+    )
 
 
 # ============================================================
