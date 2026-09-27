@@ -1364,7 +1364,8 @@ def cmd_start(message):
         "/inspect <url> - inspect manifest/DRM markers\n"
         "/help - show this help\n\n"
         f"Max video height: {MAX_VIDEO_HEIGHT}p\n"
-        f"Configured Telegram upload limit: {MAX_UPLOAD_MB} MB\n"
+        f"Requested upload limit: {REQUESTED_MAX_UPLOAD_MB} MB\n"
+        f"Active upload limit: {MAX_UPLOAD_MB} MB\n"
         f"Telegram API mode: "
         f"{'official' if OFFICIAL_TELEGRAM_API else 'local/custom'}\n\n"
         "Large audio files are compressed only when they exceed the "
@@ -1690,11 +1691,21 @@ def process_one_url(
                 "too_large",
                 f"{largest_mb:.1f} MB > {MAX_UPLOAD_MB} MB",
             )
+            limit_note = ""
+            if OFFICIAL_TELEGRAM_API and REQUESTED_MAX_UPLOAD_MB > 49:
+                limit_note = (
+                    "\n\nLocal Telegram Bot API is not connected yet. "
+                    f"Requested limit is {REQUESTED_MAX_UPLOAD_MB} MB, "
+                    "but the official Telegram Bot API keeps this bot at "
+                    "49 MB."
+                )
+
             edit_status(
                 message.chat.id,
                 status_msg.message_id,
                 f"{prefix}Could not reduce this file below "
-                f"{MAX_UPLOAD_MB} MB.",
+                f"{MAX_UPLOAD_MB} MB."
+                + limit_note,
             )
             return False
 
