@@ -42,3 +42,23 @@ decryption/circumvention. It is for public or otherwise authorized media.
 
 Never commit the BotFather token to GitHub. Keep it in Render Environment.
 If an old token was exposed publicly, revoke it in BotFather and use a new one.
+
+
+## PocketFM merged workflow
+
+The Render bot now keeps the general DDownloader URL workflow and also includes
+the safe/public parts of the PocketFM bot workflow:
+
+- Public PocketFM episode page metadata and openly exposed media-link extraction
+- Multiple PocketFM episode URLs in one Telegram message
+- Public show-page episode discovery with single/range selection
+- Title/thumbnail handling
+- Audio compression when the result is above the configured Telegram upload limit
+- Existing live download/upload progress and `/status`
+- Existing `/inspect <url>` manifest/DRM diagnostics
+
+The original `sathiyamoorthy-max/Pocket-` repository is not modified by this
+merge. DRM key extraction, decryption, and protection bypass are not included.
+
+A rollback point was created before the merge on branch
+`pre-pocket-merge-20260927`.
