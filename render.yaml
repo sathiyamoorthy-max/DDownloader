@@ -42,3 +42,28 @@ services:
 
       - key: AUTH_REFERER
         sync: false
+
+
+  - type: web
+    name: telegram-bot-api-local
+    runtime: image
+    plan: free
+
+    image:
+      url: docker.io/aiogram/telegram-bot-api:latest
+
+    envVars:
+      - key: TELEGRAM_API_ID
+        sync: false
+
+      - key: TELEGRAM_API_HASH
+        sync: false
+
+      - key: TELEGRAM_LOCAL
+        value: "1"
+
+      - key: TELEGRAM_HTTP_PORT
+        value: "10000"
+
+      - key: TELEGRAM_VERBOSITY
+        value: "1"
