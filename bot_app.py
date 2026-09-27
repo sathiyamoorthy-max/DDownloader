@@ -431,6 +431,17 @@ def handle_url(message):
         bot.reply_to(message, "Send a valid http/https media URL.")
         return
 
+    host = (urlparse(url).hostname or "").lower()
+    if host == "pocketfm.com" or host.endswith(".pocketfm.com"):
+        bot.reply_to(
+            message,
+            "Pocket FM page links cannot be downloaded by this bot. "
+            "Pocket FM currently provides offline downloads inside its own app. "
+            "If you have a direct public media URL (.mp3/.m4a/.mp4/.m3u8/.mpd), "
+            "send that URL instead."
+        )
+        return
+
     try:
         validate_public_http_url(url)
     except Exception as exc:
