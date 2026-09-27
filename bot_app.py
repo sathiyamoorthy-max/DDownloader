@@ -44,6 +44,17 @@ PROGRESS_UPDATE_SECONDS = max(
     1, int(os.getenv("PROGRESS_UPDATE_SECONDS", "2"))
 )
 
+# Optional authenticated access for NON-DECRYPTING tests.
+# Secrets are only sent to explicitly allowlisted domains.
+AUTH_DOMAINS = {
+    item.strip().lower()
+    for item in os.getenv("AUTH_DOMAINS", "").split(",")
+    if item.strip()
+}
+AUTH_COOKIE = os.getenv("AUTH_COOKIE", "").strip()
+AUTHORIZATION_HEADER = os.getenv("AUTHORIZATION_HEADER", "").strip()
+AUTH_REFERER = os.getenv("AUTH_REFERER", "").strip()
+
 _raw_allowed = os.getenv("ALLOWED_USER_IDS", "").strip()
 ALLOWED_USER_IDS = {
     int(part.strip())
@@ -144,6 +155,28 @@ def extract_url(text: str):
     if not match:
         return None
     return match.group(0).rstrip(").,]}>\"'")
+
+
+def auth_headers_for_url(url: str) -> dict:
+    host = (urlparse(url).hostname or "").lower()
+    if not host or not AUTH_DOMAINS:
+        return {}
+
+    allowed = any(
+        host == domain or host.endswith("." + domain)
+        for domain in AUTH_DOMAINS
+    )
+    if not allowed:
+        return {}
+
+    headers = {}
+    if AUTH_COOKIE:
+        headers["Cookie"] = AUTH_COOKIE
+    if AUTHORIZATION_HEADER:
+        headers["Authorization"] = AUTHORIZATION_HEADER
+    if AUTH_REFERER:
+        headers["Referer"] = AUTH_REFERER
+    return headers
 
 
 def validate_public_http_url(url: str) -> None:
