@@ -17,7 +17,10 @@ services:
         value: "100"
 
       - key: TELEGRAM_API_BASE_URL
-        sync: false
+        fromService:
+          name: telegram-bot-api-local
+          type: web
+          envVarKey: RENDER_EXTERNAL_URL
 
       - key: MAX_VIDEO_HEIGHT
         value: "1080"
