@@ -14,7 +14,10 @@ services:
         sync: false
 
       - key: MAX_UPLOAD_MB
-        value: "49"
+        value: "100"
+
+      - key: TELEGRAM_API_BASE_URL
+        sync: false
 
       - key: MAX_VIDEO_HEIGHT
         value: "1080"
