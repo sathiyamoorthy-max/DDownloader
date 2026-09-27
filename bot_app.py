@@ -179,6 +179,90 @@ def auth_headers_for_url(url: str) -> dict:
     return headers
 
 
+def fetch_for_inspection(url: str):
+    validate_public_http_url(url)
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Linux; Android 13) "
+            "AppleWebKit/537.36 Chrome/124 Safari/537.36"
+        ),
+        "Accept": "*/*",
+    }
+    headers.update(auth_headers_for_url(url))
+
+    response = requests.get(
+        url,
+        headers=headers,
+        timeout=30,
+        allow_redirects=True,
+        stream=False,
+    )
+    return response
+
+
+def detect_drm_markers(text: str) -> list[str]:
+    lower = (text or "").lower()
+    found = []
+
+    if (
+        "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" in lower
+        or "widevine" in lower
+        or "com.widevine.alpha" in lower
+    ):
+        found.append("Widevine")
+
+    if (
+        "9a04f079-9840-4286-ab92-e65be0885f95" in lower
+        or "playready" in lower
+        or "mspr:pro" in lower
+    ):
+        found.append("PlayReady")
+
+    if (
+        "com.apple.fps" in lower
+        or "skd://" in lower
+        or "fairplay" in lower
+    ):
+        found.append("FairPlay")
+
+    if (
+        "sample-aes" in lower
+        or "sample-aes-ctr" in lower
+    ):
+        found.append("SAMPLE-AES")
+
+    if (
+        "#ext-x-key" in lower
+        and "method=none" not in lower
+        and not any(
+            item in found
+            for item in ["FairPlay", "SAMPLE-AES"]
+        )
+    ):
+        found.append("HLS encryption")
+
+    return found
+
+
+def manifest_type_from_text(url: str, content_type: str, text: str) -> str:
+    lower_url = url.lower()
+    lower_ct = (content_type or "").lower()
+    lower_text = (text or "").lstrip().lower()
+
+    if ".mpd" in lower_url or "dash+xml" in lower_ct or "<mpd" in lower_text:
+        return "MPEG-DASH (.mpd)"
+    if (
+        ".m3u8" in lower_url
+        or "mpegurl" in lower_ct
+        or lower_text.startswith("#extm3u")
+    ):
+        return "HLS (.m3u8)"
+    if ".ism" in lower_url or "smoothstreamingmedia" in lower_text:
+        return "Smooth Streaming (.ism)"
+    return "Unknown / webpage"
+
+
 def validate_public_http_url(url: str) -> None:
     """
     Basic SSRF guard. The bot is meant for public internet media URLs,
@@ -886,6 +970,7 @@ def cmd_start(message):
         "Commands:\n"
         "/status - live download/upload progress\n"
         "/whoami - show your Telegram user ID\n"
+        "/inspect <url> - inspect manifest/DRM markers\n"
         "/help - show this help\n\n"
         f"Max video height: {MAX_VIDEO_HEIGHT}p\n"
         f"Configured Telegram upload limit: {MAX_UPLOAD_MB} MB\n\n"
@@ -904,6 +989,71 @@ def cmd_whoami(message):
         message,
         f"Your Telegram user ID: {message.from_user.id}"
     )
+
+
+@bot.message_handler(commands=["inspect"])
+def cmd_inspect(message):
+    if not allowed_user(message):
+        bot.reply_to(message, "This bot is private.")
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        bot.reply_to(
+            message,
+            "Usage: /inspect <url>"
+        )
+        return
+
+    url = parts[1].strip()
+    if not url.startswith(("http://", "https://")):
+        bot.reply_to(message, "Send a valid http/https URL.")
+        return
+
+    status_message = bot.reply_to(message, "Inspecting…")
+
+    try:
+        response = fetch_for_inspection(url)
+
+        content_type = response.headers.get("Content-Type", "")
+        body = response.text[:2_000_000]
+
+        drm = detect_drm_markers(body)
+        manifest_type = manifest_type_from_text(
+            response.url,
+            content_type,
+            body,
+        )
+
+        auth_used = bool(auth_headers_for_url(url))
+        auth_text = "yes" if auth_used else "no"
+
+        drm_text = ", ".join(drm) if drm else "No common DRM marker detected"
+
+        result = (
+            "Inspection result\n\n"
+            f"HTTP: {response.status_code}\n"
+            f"Final URL host: {urlparse(response.url).hostname or '?'}\n"
+            f"Content-Type: {content_type or '?'}\n"
+            f"Type: {manifest_type}\n"
+            f"Authenticated request: {auth_text}\n"
+            f"DRM/encryption markers: {drm_text}\n\n"
+            "This command only inspects metadata/manifest text; "
+            "it does not extract keys or decrypt protected media."
+        )
+
+        edit_status(
+            message.chat.id,
+            status_message.message_id,
+            result,
+        )
+
+    except Exception as exc:
+        edit_status(
+            message.chat.id,
+            status_message.message_id,
+            "Inspection failed.\n\n" + safe_error(exc),
+        )
 
 
 @bot.message_handler(commands=["status"])
