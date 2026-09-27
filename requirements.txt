@@ -1,0 +1,5 @@
+Flask>=3.1,<4
+gunicorn>=23,<24
+pyTelegramBotAPI>=4.29,<5
+requests>=2.32,<3
+yt-dlp>=2026.1.1
