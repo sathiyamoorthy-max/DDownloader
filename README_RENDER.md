@@ -62,3 +62,20 @@ merge. DRM key extraction, decryption, and protection bypass are not included.
 
 A rollback point was created before the merge on branch
 `pre-pocket-merge-20260927`.
+
+
+## Larger single-file Telegram uploads
+
+The bot supports a configurable Telegram Bot API endpoint through:
+
+- `TELEGRAM_API_BASE_URL`
+- `MAX_UPLOAD_MB`
+
+With the default hosted endpoint (`https://api.telegram.org`), the bot automatically
+clamps its effective upload limit to 49 MB. With a Local Telegram Bot API Server,
+set `TELEGRAM_API_BASE_URL` to that server and `MAX_UPLOAD_MB` to the desired
+limit (for example `100`). Audio remains a single file; compression is only used
+when the file exceeds the active configured limit.
+
+Do not put Bot API server credentials or Telegram API credentials in the repository.
+Keep them in Render Environment/Secrets.
