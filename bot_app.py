@@ -1080,10 +1080,41 @@ def pocketfm_public_show_links(url: str) -> tuple[str, list[str]]:
     return title, links[:500]
 
 
+def media_duration_seconds(path: Path):
+    if shutil.which("ffprobe") is None:
+        return None
+
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+        )
+        if completed.returncode != 0:
+            return None
+
+        duration = float((completed.stdout or "").strip())
+        return duration if duration > 0 else None
+    except Exception:
+        return None
+
+
 def maybe_compress_audio_for_upload(
     path: Path,
     job_dir: Path,
 ) -> Path:
+    """
+    Compress oversized audio to a bitrate calculated from its duration so the
+    result targets ~94% of the configured Telegram upload limit.
+    """
     if path.stat().st_size <= MAX_UPLOAD_BYTES:
         return path
 
@@ -1095,33 +1126,164 @@ def maybe_compress_audio_for_upload(
     if shutil.which("ffmpeg") is None:
         return path
 
-    output = job_dir / f"{path.stem}_compressed.mp3"
-    completed = subprocess.run(
+    duration = media_duration_seconds(path)
+    target_bytes = int(MAX_UPLOAD_BYTES * 0.94)
+
+    bitrate_steps = [128, 112, 96, 80, 64, 56, 48, 40, 32, 24]
+
+    if duration:
+        calculated_kbps = int(
+            (target_bytes * 8 / duration / 1000) * 0.92
+        )
+        candidates = [
+            kbps for kbps in bitrate_steps
+            if kbps <= calculated_kbps
+        ]
+        if not candidates:
+            candidates = [24]
+    else:
+        candidates = [48, 40, 32, 24]
+
+    # Ensure fallback bitrates are tried even if the calculated value was a
+    # little optimistic due to MP3/container overhead.
+    for kbps in bitrate_steps:
+        if kbps < candidates[-1] and kbps not in candidates:
+            candidates.append(kbps)
+
+    for kbps in candidates:
+        output = job_dir / f"{path.stem}_compressed_{kbps}k.mp3"
+
+        completed = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-y",
+                "-i", str(path),
+                "-vn",
+                "-ac", "1",
+                "-codec:a", "libmp3lame",
+                "-b:a", f"{kbps}k",
+                str(output),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60 * 60 * 2,
+        )
+
+        if (
+            completed.returncode == 0
+            and output.exists()
+            and output.stat().st_size > 0
+        ):
+            if output.stat().st_size <= target_bytes:
+                return output
+
+    # Return the smallest successful compressed output, if any.
+    compressed = sorted(
         [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel", "error",
-            "-y",
-            "-i", str(path),
-            "-vn",
-            "-b:a", "64k",
-            str(output),
+            p for p in job_dir.glob(f"{path.stem}_compressed_*k.mp3")
+            if p.is_file() and p.stat().st_size > 0
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=60 * 60,
+        key=lambda p: p.stat().st_size,
+    )
+    return compressed[0] if compressed else path
+
+
+def split_audio_for_upload(
+    path: Path,
+    job_dir: Path,
+) -> list[Path]:
+    """
+    Final fallback: split an oversized audio file into Telegram-safe parts.
+    """
+    if path.stat().st_size <= MAX_UPLOAD_BYTES:
+        return [path]
+
+    if path.suffix.lower() not in {
+        ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav"
+    }:
+        return [path]
+
+    if shutil.which("ffmpeg") is None:
+        return [path]
+
+    duration = media_duration_seconds(path)
+    if not duration:
+        return [path]
+
+    target_bytes = int(MAX_UPLOAD_BYTES * 0.90)
+
+    for safety in (0.85, 0.70, 0.55):
+        segment_seconds = max(
+            60,
+            int(
+                duration
+                * target_bytes
+                / max(path.stat().st_size, 1)
+                * safety
+            ),
+        )
+
+        for old_part in job_dir.glob("upload_part_*.mp3"):
+            try:
+                old_part.unlink()
+            except OSError:
+                pass
+
+        pattern = str(job_dir / "upload_part_%03d.mp3")
+        completed = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-y",
+                "-i", str(path),
+                "-map", "0:a:0",
+                "-c", "copy",
+                "-f", "segment",
+                "-segment_time", str(segment_seconds),
+                "-reset_timestamps", "1",
+                pattern,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60 * 60,
+        )
+
+        parts = sorted(
+            p for p in job_dir.glob("upload_part_*.mp3")
+            if p.is_file() and p.stat().st_size > 0
+        )
+
+        if (
+            completed.returncode == 0
+            and len(parts) >= 2
+            and all(p.stat().st_size <= MAX_UPLOAD_BYTES for p in parts)
+        ):
+            return parts
+
+    return [path]
+
+
+def prepare_upload_files(
+    path: Path,
+    job_dir: Path,
+) -> list[Path]:
+    compressed = maybe_compress_audio_for_upload(
+        path,
+        job_dir,
     )
 
-    if (
-        completed.returncode == 0
-        and output.exists()
-        and output.stat().st_size > 0
-        and output.stat().st_size < path.stat().st_size
-    ):
-        return output
+    if compressed.stat().st_size <= MAX_UPLOAD_BYTES:
+        return [compressed]
 
-    return path
+    return split_audio_for_upload(
+        compressed,
+        job_dir,
+    )
 
 
 def download_media(
@@ -1531,68 +1693,115 @@ def process_one_url(
             )
             result = media_info["path"]
 
-        result = maybe_compress_audio_for_upload(
+        title = media_info.get("title") or result.stem
+        thumbnail = media_info.get("thumbnail")
+
+        edit_status(
+            message.chat.id,
+            status_msg.message_id,
+            f"{prefix}Preparing Telegram-safe file size…",
+        )
+        set_job(
+            user_id,
+            "processing",
+            "Compressing/splitting oversized audio if needed…",
+        )
+
+        upload_files = prepare_upload_files(
             result,
             job_dir,
         )
 
-        size = result.stat().st_size
-        size_mb = size / (1024 * 1024)
-        title = media_info.get("title") or result.stem
-        thumbnail = media_info.get("thumbnail")
-
-        if size > MAX_UPLOAD_BYTES:
+        if any(
+            part.stat().st_size > MAX_UPLOAD_BYTES
+            for part in upload_files
+        ):
+            largest_mb = max(
+                part.stat().st_size for part in upload_files
+            ) / (1024 * 1024)
             set_job(
                 user_id,
                 "too_large",
-                f"{size_mb:.1f} MB > {MAX_UPLOAD_MB} MB",
+                f"{largest_mb:.1f} MB > {MAX_UPLOAD_MB} MB",
             )
             edit_status(
                 message.chat.id,
                 status_msg.message_id,
-                f"{prefix}Downloaded: {size_mb:.1f} MB\n"
-                f"Still above the configured upload limit "
-                f"({MAX_UPLOAD_MB} MB).",
+                f"{prefix}Could not reduce this file below "
+                f"{MAX_UPLOAD_MB} MB.",
             )
             return False
 
-        set_job(
-            user_id,
-            "uploading",
-            f"0.0% • {human_bytes(size)}",
+        total_upload_size = sum(
+            part.stat().st_size for part in upload_files
         )
 
         send_thumbnail_preview(
             message.chat.id,
             thumbnail,
             title,
-            size,
+            total_upload_size,
         )
 
-        edit_status(
-            message.chat.id,
-            status_msg.message_id,
-            f"{prefix}⬆️ Uploading to Telegram\n"
-            f"0.0% • {human_bytes(size)}",
-        )
+        part_count = len(upload_files)
+        for part_index, upload_path in enumerate(
+            upload_files,
+            start=1,
+        ):
+            size = upload_path.stat().st_size
+            part_title = (
+                title
+                if part_count == 1
+                else f"{title} (Part {part_index}/{part_count})"
+            )
 
-        bot.send_chat_action(
-            message.chat.id,
-            "upload_document",
-        )
+            set_job(
+                user_id,
+                "uploading",
+                (
+                    f"Part {part_index}/{part_count} • "
+                    f"0.0% • {human_bytes(size)}"
+                    if part_count > 1
+                    else f"0.0% • {human_bytes(size)}"
+                ),
+            )
 
-        upload_document_with_progress(
-            chat_id=message.chat.id,
-            path=result,
-            title=title,
-            user_id=user_id,
-            status_message_id=status_msg.message_id,
-        )
+            edit_status(
+                message.chat.id,
+                status_msg.message_id,
+                (
+                    f"{prefix}⬆️ Uploading part "
+                    f"{part_index}/{part_count}\n"
+                    f"0.0% • {human_bytes(size)}"
+                    if part_count > 1
+                    else (
+                        f"{prefix}⬆️ Uploading to Telegram\n"
+                        f"0.0% • {human_bytes(size)}"
+                    )
+                ),
+            )
+
+            bot.send_chat_action(
+                message.chat.id,
+                "upload_document",
+            )
+
+            upload_document_with_progress(
+                chat_id=message.chat.id,
+                path=upload_path,
+                title=part_title,
+                user_id=user_id,
+                status_message_id=status_msg.message_id,
+            )
 
         set_job(
             user_id,
             "done",
-            f"{clean_title(title)} • {human_bytes(size)}",
+            (
+                f"{clean_title(title)} • "
+                f"{human_bytes(total_upload_size)} • "
+                f"{part_count} file(s)"
+            ),
         )
 
         try:
