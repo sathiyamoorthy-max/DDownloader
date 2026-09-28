@@ -8,10 +8,27 @@ import requests
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
-TELEGRAM_API_BASE_URL = os.getenv(
+TELEGRAM_API_HOST = os.getenv(
+    "TELEGRAM_API_HOST",
+    "",
+).strip()
+TELEGRAM_API_PORT = os.getenv(
+    "TELEGRAM_API_PORT",
+    "",
+).strip()
+_CONFIGURED_API_BASE = os.getenv(
     "TELEGRAM_API_BASE_URL",
-    "https://api.telegram.org",
+    "",
 ).strip().rstrip("/")
+
+if TELEGRAM_API_HOST:
+    TELEGRAM_API_BASE_URL = "http://" + TELEGRAM_API_HOST
+    if TELEGRAM_API_PORT:
+        TELEGRAM_API_BASE_URL += ":" + TELEGRAM_API_PORT
+elif _CONFIGURED_API_BASE:
+    TELEGRAM_API_BASE_URL = _CONFIGURED_API_BASE
+else:
+    TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 
 if not BOT_TOKEN:
     raise SystemExit("TELEGRAM_BOT_TOKEN is missing.")
