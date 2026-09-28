@@ -56,7 +56,12 @@ else
   export TELEGRAM_API_BASE_URL="https://api.telegram.org"
 fi
 
-python /app/register_webhook.py
+# Bind Render's web port immediately. Webhook setup runs in the background so
+# Telegram rate limits cannot make the whole Render service fail health checks.
+(
+  sleep 3
+  python /app/register_webhook.py || true
+) &
 
 exec gunicorn \
   --bind "0.0.0.0:${PORT:-10000}" \
