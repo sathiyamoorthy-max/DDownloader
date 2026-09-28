@@ -1307,10 +1307,6 @@ def ytdlp_download(
         "overwrites": True,
     }
 
-    scoped_auth = auth_headers_for_url(url)
-    if scoped_auth:
-        opts["http_headers"] = scoped_auth
-
     if progress_hook:
         opts["progress_hooks"] = [progress_hook]
 
