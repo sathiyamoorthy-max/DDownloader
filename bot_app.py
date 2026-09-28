@@ -2358,7 +2358,19 @@ def process_one_url(
         )
 
         probe = probe_media_streams(result)
-        if probe.get("has_video"):
+
+        # PocketFM episodes are audio-first content. Some public manifests can
+        # include a poster/video track inside an MP4 container, which made the
+        # bot incorrectly send them as Telegram videos. If a PocketFM source
+        # contains audio, always extract/send the audio stream as sendAudio.
+        pocketfm_audio_source = (
+            is_pocketfm_url(url)
+            or is_pocketfm_onelink(url)
+        )
+
+        if pocketfm_audio_source and probe.get("has_audio"):
+            media_kind = "audio"
+        elif probe.get("has_video"):
             media_kind = "video"
         elif probe.get("has_audio"):
             media_kind = "audio"
@@ -2374,9 +2386,13 @@ def process_one_url(
             user_id,
             "processing",
             (
-                "Preparing audio title, cover and file size…"
-                if media_kind == "audio"
-                else "Preparing video + audio for Telegram…"
+                "Preparing PocketFM audio card…"
+                if media_kind == "audio" and pocketfm_audio_source
+                else (
+                    "Preparing audio title, cover and file size…"
+                    if media_kind == "audio"
+                    else "Preparing video + audio for Telegram…"
+                )
             ),
         )
 
