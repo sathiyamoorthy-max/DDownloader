@@ -53,9 +53,8 @@ api = (
     f"{TELEGRAM_API_BASE_URL}/bot{BOT_TOKEN}/setWebhook"
 )
 
-# When a Local Bot API endpoint is configured, automatically perform the
-# cloud -> local handoff. Repeating logOut is harmless for this startup flow:
-# failures are logged and webhook registration still retries against local.
+# When a Local Bot API endpoint is configured, perform a best-effort
+# cloud -> local handoff. Any Telegram rate limit here is non-fatal.
 if TELEGRAM_API_BASE_URL != "https://api.telegram.org":
     cloud_logout = (
         f"https://api.telegram.org/bot{BOT_TOKEN}/logOut"
@@ -84,12 +83,31 @@ payload = {
 }
 
 last_error = None
+max_attempts = 20
 
-for attempt in range(1, 13):
+for attempt in range(1, max_attempts + 1):
+    retry_after = None
     try:
         response = requests.post(api, json=payload, timeout=30)
+
+        try:
+            data = response.json()
+        except Exception:
+            data = {}
+
+        if response.status_code == 429:
+            parameters = data.get("parameters") or {}
+            try:
+                retry_after = int(parameters.get("retry_after") or 0)
+            except (TypeError, ValueError):
+                retry_after = None
+
+            description = data.get("description") or "Too Many Requests"
+            raise RuntimeError(
+                f"429 Too Many Requests: {description}"
+            )
+
         response.raise_for_status()
-        data = response.json()
 
         if not data.get("ok"):
             raise RuntimeError(str(data))
@@ -102,12 +120,20 @@ for attempt in range(1, 13):
     except Exception as exc:
         last_error = redact_secret(exc)
         print(
-            f"Webhook setup attempt {attempt}/12 failed: "
+            f"Webhook setup attempt {attempt}/{max_attempts} failed: "
             f"{redact_secret(exc)}"
         )
-        time.sleep(min(3 + attempt, 15))
 
-raise SystemExit(
-    "Unable to configure Telegram webhook: "
-    + redact_secret(last_error)
+        if retry_after:
+            wait_seconds = min(max(retry_after + 1, 5), 120)
+        else:
+            wait_seconds = min(5 + attempt * 2, 30)
+
+        print(f"Retrying webhook setup in {wait_seconds}s...")
+        time.sleep(wait_seconds)
+
+print(
+    "Webhook setup is still pending after retries. "
+    "The web service will remain online; redeploy is not required."
 )
+sys.exit(0)
