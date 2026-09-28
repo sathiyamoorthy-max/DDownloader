@@ -32,27 +32,25 @@ from yt_dlp.utils import DownloadError
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 PORT = int(os.getenv("PORT", "10000"))
 
-TELEGRAM_API_HOST = os.getenv(
-    "TELEGRAM_API_HOST",
-    "",
-).strip()
-TELEGRAM_API_PORT = os.getenv(
-    "TELEGRAM_API_PORT",
-    "",
-).strip()
+TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID", "").strip()
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "").strip()
+TELEGRAM_API_HOST = os.getenv("TELEGRAM_API_HOST", "").strip()
+TELEGRAM_API_PORT = os.getenv("TELEGRAM_API_PORT", "").strip()
 _CONFIGURED_API_BASE = os.getenv(
     "TELEGRAM_API_BASE_URL",
     "",
 ).strip().rstrip("/")
 
-# Prefer Render's private-network service reference when available.
-# This avoids relying on a public onrender.com URL between the two services.
-if TELEGRAM_API_HOST:
+# Simplest Render setup: when API ID + hash are present, start and use the
+# Local Bot API server inside this same container on 127.0.0.1:8081.
+if _CONFIGURED_API_BASE:
+    TELEGRAM_API_BASE_URL = _CONFIGURED_API_BASE
+elif TELEGRAM_API_HOST:
     TELEGRAM_API_BASE_URL = "http://" + TELEGRAM_API_HOST
     if TELEGRAM_API_PORT:
         TELEGRAM_API_BASE_URL += ":" + TELEGRAM_API_PORT
-elif _CONFIGURED_API_BASE:
-    TELEGRAM_API_BASE_URL = _CONFIGURED_API_BASE
+elif TELEGRAM_API_ID and TELEGRAM_API_HASH:
+    TELEGRAM_API_BASE_URL = "http://127.0.0.1:8081"
 else:
     TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 
