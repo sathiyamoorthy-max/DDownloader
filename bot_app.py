@@ -1536,10 +1536,10 @@ def pocketfm_public_page_info(url: str) -> dict:
 
     series = None
     for pattern in [
-        r'["\\\'](?:seriesName|showName|series_name|showTitle|show_title)["\\\']'
-        r'\\s*:\\s*["\\\']([^"\\\']+)',
-        r'["\\\'](?:series|show)["\\\']\\s*:\\s*\\{[^{}]{0,800}?'
-        r'["\\\'](?:name|title)["\\\']\\s*:\\s*["\\\']([^"\\\']+)',
+        r"[\"'](?:seriesName|showName|series_name|showTitle|show_title)"
+        r"[\"']\s*:\s*[\"']([^\"']+)",
+        r"[\"'](?:series|show)[\"']\s*:\s*\{[^{}]{0,800}?"
+        r"[\"'](?:name|title)[\"']\s*:\s*[\"']([^\"']+)",
     ]:
         match = re.search(pattern, normalized, re.I | re.S)
         if match:
