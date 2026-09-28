@@ -4,7 +4,7 @@ services:
     runtime: docker
     plan: free
     healthCheckPath: /health
-    autoDeploy: true
+    autoDeployTrigger: commit
 
     envVars:
       - key: TELEGRAM_BOT_TOKEN
@@ -55,11 +55,10 @@ services:
 
   - type: web
     name: telegram-bot-api-local
-    runtime: image
+    runtime: docker
     plan: free
-
-    image:
-      url: docker.io/aiogram/telegram-bot-api:latest
+    dockerfilePath: ./Dockerfile.botapi
+    autoDeployTrigger: commit
 
     envVars:
       - key: TELEGRAM_API_ID
