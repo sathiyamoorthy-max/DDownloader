@@ -47,6 +47,29 @@ api = (
     f"{TELEGRAM_API_BASE_URL}/bot{BOT_TOKEN}/setWebhook"
 )
 
+# When a Local Bot API endpoint is configured, automatically perform the
+# cloud -> local handoff. Repeating logOut is harmless for this startup flow:
+# failures are logged and webhook registration still retries against local.
+if TELEGRAM_API_BASE_URL != "https://api.telegram.org":
+    cloud_logout = (
+        f"https://api.telegram.org/bot{BOT_TOKEN}/logOut"
+    )
+    try:
+        response = requests.post(cloud_logout, timeout=30)
+        try:
+            data = response.json()
+        except Exception:
+            data = {}
+        if data.get("ok"):
+            print("Cloud Bot API logout completed automatically.")
+        else:
+            print(
+                "Cloud Bot API logout returned:",
+                data.get("description") or response.status_code,
+            )
+    except Exception as exc:
+        print("Cloud Bot API logout check failed:", exc)
+
 payload = {
     "url": webhook_url,
     "secret_token": secret,
@@ -56,7 +79,7 @@ payload = {
 
 last_error = None
 
-for attempt in range(1, 6):
+for attempt in range(1, 13):
     try:
         response = requests.post(api, json=payload, timeout=30)
         response.raise_for_status()
@@ -72,7 +95,7 @@ for attempt in range(1, 6):
 
     except Exception as exc:
         last_error = exc
-        print(f"Webhook setup attempt {attempt}/5 failed: {exc}")
-        time.sleep(min(2 ** attempt, 15))
+        print(f"Webhook setup attempt {attempt}/12 failed: {exc}")
+        time.sleep(min(3 + attempt, 15))
 
 raise SystemExit(f"Unable to configure Telegram webhook: {last_error}")
