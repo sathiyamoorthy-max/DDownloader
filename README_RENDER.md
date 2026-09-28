@@ -79,3 +79,26 @@ when the file exceeds the active configured limit.
 
 Do not put Bot API server credentials or Telegram API credentials in the repository.
 Keep them in Render Environment/Secrets.
+
+
+## Authorized non-DRM downloads
+
+The bot can use credentials stored only in Render Environment for explicitly
+allowlisted domains:
+
+- `AUTH_DOMAINS`
+- `AUTH_COOKIE`
+- `AUTHORIZATION_HEADER`
+- `AUTH_REFERER`
+
+Authenticated requests are scoped per redirect hop: authorization values are
+recalculated for the destination host and are not forwarded to hosts that are
+not listed in `AUTH_DOMAINS`.
+
+This mode is for media the user is already authorized to access and that does
+not require DRM decryption. It can authenticate normal webpage/direct-media
+requests and download openly exposed non-DRM media URLs. It does not obtain
+licenses or keys, bypass entitlements/paywalls, or decrypt protected streams.
+
+Use `/authstatus` in Telegram to verify that the configuration is present
+without printing any secret values.
