@@ -1472,9 +1472,9 @@ def _extract_pocketfm_episode_from_payload(value: str | None) -> str | None:
 
     # Also inspect JSON/HTML text around common OneLink field names.
     for match in re.finditer(
-        r'(?i)(?:af_dp|af_web_dp|af_android_url|af_ios_url|'
-        r'deep_link_value|deep_link_sub[1-5])["\\']?\s*[:=]\s*'
-        r'["\\']([^"\\']+)["\\']',
+        r"(?i)(?:af_dp|af_web_dp|af_android_url|af_ios_url|"
+        r"deep_link_value|deep_link_sub[1-5])[\\\"']?\\s*[:=]\\s*"
+        r"[\\\"']([^\\\"']+)[\\\"']",
         text,
     ):
         episode = _pocketfm_episode_url_from_text(match.group(1))
