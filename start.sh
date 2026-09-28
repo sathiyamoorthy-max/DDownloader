@@ -2,16 +2,10 @@
 set -eu
 
 LOCAL_API_PID=""
-
-cleanup() {
-  if [ -n "$LOCAL_API_PID" ]; then
-    kill "$LOCAL_API_PID" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT INT TERM
+LOCAL_API_LOG="/tmp/telegram-bot-api-startup.log"
 
 if [ -n "${TELEGRAM_API_ID:-}" ] && [ -n "${TELEGRAM_API_HASH:-}" ]; then
-  echo "Starting Local Telegram Bot API on 127.0.0.1:8081..."
+  echo "Starting embedded Local Telegram Bot API on 127.0.0.1:8081..."
 
   telegram-bot-api \
     --local \
@@ -19,15 +13,41 @@ if [ -n "${TELEGRAM_API_ID:-}" ] && [ -n "${TELEGRAM_API_HASH:-}" ]; then
     --http-port=8081 \
     --dir=/tmp/telegram-bot-api \
     --temp-dir=/tmp/telegram-bot-api-temp \
-    --verbosity=1 &
+    --verbosity=0 \
+    >"$LOCAL_API_LOG" 2>&1 &
 
   LOCAL_API_PID=$!
 
-  # Give the local API process a moment to initialize. Webhook registration
-  # below has its own retry loop as well.
-  sleep 4
+  READY=0
+  i=0
+  while [ "$i" -lt 30 ]; do
+    if ! kill -0 "$LOCAL_API_PID" 2>/dev/null; then
+      echo "Local Telegram Bot API exited during startup."
+      echo "Startup log:"
+      tail -n 40 "$LOCAL_API_LOG" 2>/dev/null || true
+      exit 1
+    fi
+
+    if curl -sS --max-time 1 "http://127.0.0.1:8081/" >/dev/null 2>&1; then
+      READY=1
+      break
+    fi
+
+    i=$((i + 1))
+    sleep 1
+  done
+
+  if [ "$READY" -ne 1 ]; then
+    echo "Local Telegram Bot API did not become ready on port 8081."
+    tail -n 40 "$LOCAL_API_LOG" 2>/dev/null || true
+    exit 1
+  fi
+
+  export TELEGRAM_API_BASE_URL="http://127.0.0.1:8081"
+  echo "Embedded Local Telegram Bot API is ready."
 else
   echo "TELEGRAM_API_ID/HASH not set; using official Telegram Bot API."
+  export TELEGRAM_API_BASE_URL="https://api.telegram.org"
 fi
 
 python /app/register_webhook.py
