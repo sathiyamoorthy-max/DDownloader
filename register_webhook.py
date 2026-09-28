@@ -6,6 +6,14 @@ import time
 import requests
 
 
+def redact_secret(value: object) -> str:
+    text = str(value)
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if token:
+        text = text.replace(token, "<BOT_TOKEN>")
+    return text
+
+
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID", "").strip()
@@ -66,7 +74,7 @@ if TELEGRAM_API_BASE_URL != "https://api.telegram.org":
                 data.get("description") or response.status_code,
             )
     except Exception as exc:
-        print("Cloud Bot API logout check failed:", exc)
+        print("Cloud Bot API logout check failed:", redact_secret(exc))
 
 payload = {
     "url": webhook_url,
@@ -92,8 +100,14 @@ for attempt in range(1, 13):
         sys.exit(0)
 
     except Exception as exc:
-        last_error = exc
-        print(f"Webhook setup attempt {attempt}/12 failed: {exc}")
+        last_error = redact_secret(exc)
+        print(
+            f"Webhook setup attempt {attempt}/12 failed: "
+            f"{redact_secret(exc)}"
+        )
         time.sleep(min(3 + attempt, 15))
 
-raise SystemExit(f"Unable to configure Telegram webhook: {last_error}")
+raise SystemExit(
+    "Unable to configure Telegram webhook: "
+    + redact_secret(last_error)
+)
