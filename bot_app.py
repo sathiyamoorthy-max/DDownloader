@@ -32,10 +32,29 @@ from yt_dlp.utils import DownloadError
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 PORT = int(os.getenv("PORT", "10000"))
 
-TELEGRAM_API_BASE_URL = os.getenv(
+TELEGRAM_API_HOST = os.getenv(
+    "TELEGRAM_API_HOST",
+    "",
+).strip()
+TELEGRAM_API_PORT = os.getenv(
+    "TELEGRAM_API_PORT",
+    "",
+).strip()
+_CONFIGURED_API_BASE = os.getenv(
     "TELEGRAM_API_BASE_URL",
-    "https://api.telegram.org",
+    "",
 ).strip().rstrip("/")
+
+# Prefer Render's private-network service reference when available.
+# This avoids relying on a public onrender.com URL between the two services.
+if TELEGRAM_API_HOST:
+    TELEGRAM_API_BASE_URL = "http://" + TELEGRAM_API_HOST
+    if TELEGRAM_API_PORT:
+        TELEGRAM_API_BASE_URL += ":" + TELEGRAM_API_PORT
+elif _CONFIGURED_API_BASE:
+    TELEGRAM_API_BASE_URL = _CONFIGURED_API_BASE
+else:
+    TELEGRAM_API_BASE_URL = "https://api.telegram.org"
 
 OFFICIAL_TELEGRAM_API = (
     TELEGRAM_API_BASE_URL.lower() == "https://api.telegram.org"
