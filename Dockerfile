@@ -1,14 +1,19 @@
-FROM python:3.12-slim
+FROM aiogram/telegram-bot-api:latest AS botapi
+
+FROM python:3.12-alpine
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PORT=10000
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-       ffmpeg \
-       ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache \
+    ffmpeg \
+    ca-certificates \
+    libstdc++ \
+    openssl \
+    curl
+
+COPY --from=botapi /usr/local/bin/telegram-bot-api /usr/local/bin/telegram-bot-api
 
 WORKDIR /app
 
@@ -22,7 +27,9 @@ COPY register_webhook.py /app/register_webhook.py
 COPY start.sh /app/start.sh
 
 RUN chmod +x /app/start.sh \
-    && mkdir -p /app/downloads
+    && mkdir -p /app/downloads \
+    && mkdir -p /tmp/telegram-bot-api \
+    && mkdir -p /tmp/telegram-bot-api-temp
 
 EXPOSE 10000
 
