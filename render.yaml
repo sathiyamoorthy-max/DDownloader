@@ -10,23 +10,17 @@ services:
       - key: TELEGRAM_BOT_TOKEN
         sync: false
 
+      - key: TELEGRAM_API_ID
+        sync: false
+
+      - key: TELEGRAM_API_HASH
+        sync: false
+
       - key: ALLOWED_USER_IDS
         sync: false
 
       - key: MAX_UPLOAD_MB
         value: "100"
-
-      - key: TELEGRAM_API_HOST
-        fromService:
-          name: telegram-bot-api-local
-          type: web
-          property: host
-
-      - key: TELEGRAM_API_PORT
-        fromService:
-          name: telegram-bot-api-local
-          type: web
-          property: port
 
       - key: MAX_VIDEO_HEIGHT
         value: "1080"
@@ -51,27 +45,3 @@ services:
 
       - key: AUTH_REFERER
         sync: false
-
-
-  - type: web
-    name: telegram-bot-api-local
-    runtime: docker
-    plan: free
-    dockerfilePath: ./Dockerfile.botapi
-    autoDeployTrigger: commit
-
-    envVars:
-      - key: TELEGRAM_API_ID
-        sync: false
-
-      - key: TELEGRAM_API_HASH
-        sync: false
-
-      - key: TELEGRAM_LOCAL
-        value: "1"
-
-      - key: TELEGRAM_HTTP_PORT
-        value: "10000"
-
-      - key: TELEGRAM_VERBOSITY
-        value: "1"
