@@ -3,16 +3,22 @@ set -eu
 
 LOCAL_API_PID=""
 LOCAL_API_LOG="/tmp/telegram-bot-api-startup.log"
+LOCAL_API_DIR="/app/.telegram-bot-api"
+LOCAL_API_TEMP_DIR="/app/.telegram-bot-api-temp"
 
 if [ -n "${TELEGRAM_API_ID:-}" ] && [ -n "${TELEGRAM_API_HASH:-}" ]; then
   echo "Starting embedded Local Telegram Bot API on 127.0.0.1:8081..."
+
+  # Render can provide a fresh runtime /tmp that does not contain directories
+  # created while building the image. Create the Bot API directories now.
+  mkdir -p "$LOCAL_API_DIR" "$LOCAL_API_TEMP_DIR"
 
   telegram-bot-api \
     --local \
     --http-ip-address=127.0.0.1 \
     --http-port=8081 \
-    --dir=/tmp/telegram-bot-api \
-    --temp-dir=/tmp/telegram-bot-api-temp \
+    --dir="$LOCAL_API_DIR" \
+    --temp-dir="$LOCAL_API_TEMP_DIR" \
     --verbosity=0 \
     >"$LOCAL_API_LOG" 2>&1 &
 
