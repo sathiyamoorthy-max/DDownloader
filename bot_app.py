@@ -247,26 +247,142 @@ def auth_headers_for_url(url: str) -> dict:
     return headers
 
 
-def fetch_for_inspection(url: str):
-    validate_public_http_url(url)
-
+def request_headers_for_url(
+    url: str,
+    accept: str = "*/*",
+) -> dict:
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Linux; Android 13) "
             "AppleWebKit/537.36 Chrome/124 Safari/537.36"
         ),
-        "Accept": "*/*",
+        "Accept": accept,
     }
     headers.update(auth_headers_for_url(url))
+    return headers
 
-    response = requests.get(
+
+def scoped_get(
+    url: str,
+    *,
+    accept: str = "*/*",
+    timeout: int = 30,
+    stream: bool = False,
+    max_redirects: int = 5,
+):
+    """
+    GET with per-hop auth scoping. Auth headers are recalculated after every
+    redirect, so secrets are never forwarded to a host that is not explicitly
+    allowlisted in AUTH_DOMAINS.
+    """
+    current = url
+    for _ in range(max_redirects + 1):
+        validate_public_http_url(current)
+        response = requests.get(
+            current,
+            headers=request_headers_for_url(current, accept),
+            timeout=timeout,
+            allow_redirects=False,
+            stream=stream,
+        )
+
+        if 300 <= response.status_code < 400:
+            location = response.headers.get("Location")
+            if not location:
+                return response
+            next_url = urljoin(current, location)
+            response.close()
+            current = next_url
+            continue
+
+        return response
+
+    raise RuntimeError("Too many redirects.")
+
+
+def authenticated_direct_download(
+    url: str,
+    job_dir: Path,
+    progress_hook=None,
+) -> dict:
+    """
+    Download an authorized NON-MANIFEST media file with per-hop scoped auth.
+    This does not fetch licenses, keys, or decrypt protected streams.
+    """
+    response = scoped_get(
         url,
-        headers=headers,
-        timeout=30,
-        allow_redirects=True,
-        stream=False,
+        accept="*/*",
+        timeout=60,
+        stream=True,
+        max_redirects=5,
     )
-    return response
+    response.raise_for_status()
+
+    final_url = response.url or url
+    suffix = Path(urlparse(final_url).path).suffix.lower()
+    if suffix not in {
+        ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav",
+        ".mp4", ".mkv", ".webm", ".mov", ".ts",
+    }:
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        if "audio/mpeg" in content_type:
+            suffix = ".mp3"
+        elif "audio/mp4" in content_type or "audio/aac" in content_type:
+            suffix = ".m4a"
+        elif "video/mp4" in content_type:
+            suffix = ".mp4"
+        else:
+            suffix = ".bin"
+
+    output = job_dir / ("authorized_media" + suffix)
+    total = response.headers.get("Content-Length")
+    try:
+        total_bytes = int(total) if total else None
+    except ValueError:
+        total_bytes = None
+
+    downloaded = 0
+    with output.open("wb") as target:
+        for chunk in response.iter_content(256 * 1024):
+            if not chunk:
+                continue
+            target.write(chunk)
+            downloaded += len(chunk)
+            if progress_hook:
+                progress_hook({
+                    "status": "downloading",
+                    "downloaded_bytes": downloaded,
+                    "total_bytes": total_bytes,
+                })
+
+    response.close()
+
+    if not output.exists() or output.stat().st_size <= 0:
+        raise RuntimeError("Authorized media download produced an empty file.")
+
+    if progress_hook:
+        progress_hook({
+            "status": "finished",
+            "downloaded_bytes": output.stat().st_size,
+            "total_bytes": total_bytes or output.stat().st_size,
+        })
+
+    return {
+        "path": output,
+        "title": clean_title(Path(urlparse(final_url).path).stem, "media"),
+        "thumbnail": None,
+        "duration": None,
+    }
+
+
+def fetch_for_inspection(url: str):
+    return scoped_get(
+        url,
+        accept="*/*",
+        timeout=30,
+        stream=False,
+        max_redirects=5,
+    )
 
 
 def detect_drm_markers(text: str) -> list[str]:
@@ -460,17 +576,12 @@ def extract_public_media_candidates(page_url: str) -> dict:
     """
     validate_public_http_url(page_url)
 
-    response = requests.get(
+    response = scoped_get(
         page_url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 13) "
-                "AppleWebKit/537.36 Chrome/124 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml",
-        },
+        accept="text/html,application/xhtml+xml",
         timeout=30,
-        allow_redirects=True,
+        stream=False,
+        max_redirects=5,
     )
     response.raise_for_status()
 
@@ -563,6 +674,13 @@ def download_public_candidate(
             )
 
         return ffmpeg_manifest_fallback(candidate, job_dir)
+
+    if auth_headers_for_url(candidate):
+        return authenticated_direct_download(
+            candidate,
+            job_dir,
+            progress_hook=progress_hook,
+        )
 
     return ytdlp_download(
         candidate,
@@ -1189,6 +1307,10 @@ def ytdlp_download(
         "overwrites": True,
     }
 
+    scoped_auth = auth_headers_for_url(url)
+    if scoped_auth:
+        opts["http_headers"] = scoped_auth
+
     if progress_hook:
         opts["progress_hooks"] = [progress_hook]
 
@@ -1673,12 +1795,15 @@ def cmd_start(message):
         "/status - live download/upload progress\n"
         "/whoami - show your Telegram user ID\n"
         "/inspect <url> - inspect manifest/DRM markers\n"
+        "/authstatus - show authorized-download config status\n"
         "/help - show this help\n\n"
         f"Max video height: {MAX_VIDEO_HEIGHT}p\n"
         f"Requested upload limit: {REQUESTED_MAX_UPLOAD_MB} MB\n"
         f"Active upload limit: {MAX_UPLOAD_MB} MB\n"
         f"Telegram API mode: "
         f"{'official' if OFFICIAL_TELEGRAM_API else 'local/custom'}\n\n"
+        "Allowlisted authenticated, non-DRM sources can use Render-stored "
+        "authorization headers. "
         "Audio-only sources are sent as Telegram audio with episode title "
         "and cover art. Video sources are sent as video with audio. "
         "Large audio files are compressed only when they exceed the "
@@ -1765,6 +1890,32 @@ def cmd_inspect(message):
             status_message.message_id,
             "Inspection failed.\n\n" + safe_error(exc),
         )
+
+
+@bot.message_handler(commands=["authstatus"])
+def cmd_authstatus(message):
+    if not allowed_user(message):
+        bot.reply_to(message, "This bot is private.")
+        return
+
+    configured = bool(
+        AUTH_DOMAINS
+        and (AUTH_COOKIE or AUTHORIZATION_HEADER or AUTH_REFERER)
+    )
+    domains = ", ".join(sorted(AUTH_DOMAINS)) if AUTH_DOMAINS else "none"
+    bot.reply_to(
+        message,
+        (
+            "Authorized non-DRM download config\n\n"
+            f"Configured: {'yes' if configured else 'no'}\n"
+            f"Allowlisted domains: {domains}\n"
+            f"Cookie present: {'yes' if AUTH_COOKIE else 'no'}\n"
+            f"Authorization header present: "
+            f"{'yes' if AUTHORIZATION_HEADER else 'no'}\n"
+            f"Referer present: {'yes' if AUTH_REFERER else 'no'}\n\n"
+            "Secrets are never shown. DRM/license/key bypass is not supported."
+        ),
+    )
 
 
 @bot.message_handler(commands=["status"])
