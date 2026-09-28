@@ -1200,9 +1200,13 @@ def upload_media_with_progress(
         caption_icon = "📄"
 
     caption = (
-        f"✅ Done\n"
-        f"{caption_icon} {clean_title(title, path.stem)}\n"
-        f"📦 {human_bytes(size)}"
+        ""
+        if media_kind == "audio"
+        else (
+            f"✅ Done\n"
+            f"{caption_icon} {clean_title(title, path.stem)}\n"
+            f"📦 {human_bytes(size)}"
+        )
     )
 
     api_url = (
@@ -1214,9 +1218,10 @@ def upload_media_with_progress(
         media = stack.enter_context(path.open("rb"))
         fields = {
             "chat_id": str(chat_id),
-            "caption": caption[:1024],
             field_name: (filename, media, mime),
         }
+        if caption:
+            fields["caption"] = caption[:1024]
 
         if media_kind == "audio":
             fields["title"] = clean_title(title, path.stem)[:128]
@@ -1225,6 +1230,9 @@ def upload_media_with_progress(
                     performer,
                     "PocketFM",
                 )[:64]
+            duration = media_duration_seconds(path)
+            if duration:
+                fields["duration"] = str(max(1, int(round(duration))))
         elif media_kind == "video":
             fields["supports_streaming"] = "true"
 
@@ -1526,6 +1534,20 @@ def pocketfm_public_page_info(url: str) -> dict:
     )
     thumbnail = meta_value("og:image")
 
+    series = None
+    for pattern in [
+        r'["\\\'](?:seriesName|showName|series_name|showTitle|show_title)["\\\']'
+        r'\\s*:\\s*["\\\']([^"\\\']+)',
+        r'["\\\'](?:series|show)["\\\']\\s*:\\s*\\{[^{}]{0,800}?'
+        r'["\\\'](?:name|title)["\\\']\\s*:\\s*["\\\']([^"\\\']+)',
+    ]:
+        match = re.search(pattern, normalized, re.I | re.S)
+        if match:
+            candidate = clean_title(match.group(1), "")
+            if candidate and candidate.lower() not in {"pocket fm", "pocketfm"}:
+                series = candidate
+                break
+
     raw_candidates = re.findall(
         r'https?://[^\s"\'<>]+?\.(?:m3u8|mp3|m4a|aac|mp4)(?:\?[^\s"\'<>]*)?',
         normalized,
@@ -1548,6 +1570,7 @@ def pocketfm_public_page_info(url: str) -> dict:
     return {
         "title": clean_title(title, "Pocket FM"),
         "thumbnail": thumbnail,
+        "series": series,
         "candidates": candidates[:20],
         "final_url": response.url,
     }
@@ -1573,6 +1596,7 @@ def pocketfm_public_download(
                 page.get("thumbnail")
                 or result.get("thumbnail")
             )
+            result["performer"] = page.get("series") or "PocketFM"
             return result
         except Exception as exc:
             last_error = exc
@@ -1912,8 +1936,9 @@ def cmd_start(message):
         f"{'official' if OFFICIAL_TELEGRAM_API else 'local/custom'}\n\n"
         "Allowlisted authenticated, non-DRM sources can use Render-stored "
         "authorization headers. "
-        "Audio-only sources are sent as Telegram audio with episode title "
-        "and cover art. Video sources are sent as video with audio. "
+        "Audio-only sources are sent as native Telegram audio cards with "
+        "episode title, series/artist, duration and cover art when available. "
+        "Video sources are sent as video with audio. "
         "Large audio files are compressed only when they exceed the "
         "active upload limit. "
         "DRM keys/decryption and protection bypass are not supported."
@@ -2182,6 +2207,7 @@ def process_pocket_range(message):
         message,
         selected,
         batch_label=f"PocketFM episodes {start}-{end}",
+        performer_override=state.get("title"),
     )
 
 
@@ -2190,6 +2216,7 @@ def process_one_url(
     url: str,
     user_id: int,
     sequence_text: str = "",
+    performer_override: str | None = None,
 ) -> bool:
     job_id = f"{user_id}_{message.message_id}_{uuid.uuid4().hex[:8]}"
     job_dir = DOWNLOAD_ROOT / job_id
@@ -2235,7 +2262,15 @@ def process_one_url(
 
         title = media_info.get("title") or result.stem
         thumbnail = media_info.get("thumbnail")
-        performer = "PocketFM" if is_pocketfm_url(url) else None
+        performer = (
+            media_info.get("performer")
+            or performer_override
+            or (
+                "PocketFM"
+                if is_pocketfm_url(url) or is_pocketfm_onelink(url)
+                else None
+            )
+        )
 
         probe = probe_media_streams(result)
         if probe.get("has_video"):
@@ -2430,6 +2465,7 @@ def process_url_batch(
     message,
     urls: list[str],
     batch_label: str = "",
+    performer_override: str | None = None,
 ):
     if not message.from_user:
         return
@@ -2464,6 +2500,7 @@ def process_url_batch(
                 url,
                 user_id,
                 sequence_text=sequence,
+                performer_override=performer_override,
             ):
                 success += 1
 
