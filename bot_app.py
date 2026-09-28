@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from pathlib import Path
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 from flask import Flask, jsonify, request
 import requests
@@ -269,6 +269,7 @@ def scoped_get(
     timeout: int = 30,
     stream: bool = False,
     max_redirects: int = 5,
+    extra_headers: dict | None = None,
 ):
     """
     GET with per-hop auth scoping. Auth headers are recalculated after every
@@ -278,9 +279,15 @@ def scoped_get(
     current = url
     for _ in range(max_redirects + 1):
         validate_public_http_url(current)
+        headers = request_headers_for_url(current, accept)
+        if extra_headers:
+            headers.update(extra_headers)
+            # Auth values always win over convenience/default headers.
+            headers.update(auth_headers_for_url(current))
+
         response = requests.get(
             current,
-            headers=request_headers_for_url(current, accept),
+            headers=headers,
             timeout=timeout,
             allow_redirects=False,
             stream=stream,
@@ -1374,6 +1381,103 @@ def ffmpeg_manifest_fallback(url: str, job_dir: Path) -> dict:
     }
 
 
+def is_pocketfm_onelink(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host == "pocketfm.onelink.me" or host.endswith(".pocketfm.onelink.me")
+
+
+def _pocketfm_episode_url_from_text(value: str | None) -> str | None:
+    if not value:
+        return None
+
+    text = str(value)
+    for _ in range(3):
+        decoded = unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+
+    match = re.search(
+        r'https?://(?:www\.)?pocketfm\.com/episode/'
+        r'[A-Za-z0-9_-]+(?:\?[^\s"\'<>]*)?',
+        text,
+        flags=re.I,
+    )
+    if match:
+        return match.group(0).rstrip(").,]}>")
+
+    # Some OneLink campaigns can carry an app deep link instead of a web URL.
+    match = re.search(
+        r'pocketfm://(?:[^\s"\'<>]*/)?episode/'
+        r'([A-Za-z0-9_-]+)',
+        text,
+        flags=re.I,
+    )
+    if match:
+        return "https://www.pocketfm.com/episode/" + match.group(1)
+
+    return None
+
+
+def resolve_pocketfm_onelink(url: str) -> tuple[str | None, str]:
+    """
+    Resolve a PocketFM OneLink only when it exposes a normal episode URL/deep
+    link. If it resolves only to an app-store landing page, there is no episode
+    URL for this downloader to use.
+    """
+    validate_public_http_url(url)
+    current = url
+
+    for _ in range(8):
+        episode = _pocketfm_episode_url_from_text(current)
+        if episode:
+            return episode, current
+
+        parsed = urlparse(current)
+        query = parse_qs(parsed.query)
+        for values in query.values():
+            for value in values:
+                episode = _pocketfm_episode_url_from_text(value)
+                if episode:
+                    return episode, current
+
+        response = requests.get(
+            current,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Linux; Android 13) "
+                    "AppleWebKit/537.36 Chrome/124 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,*/*",
+            },
+            timeout=30,
+            allow_redirects=False,
+        )
+
+        location = response.headers.get("Location")
+        if 300 <= response.status_code < 400 and location:
+            current = urljoin(current, location)
+            response.close()
+            continue
+
+        body = ""
+        content_type = (response.headers.get("Content-Type") or "").lower()
+        if "text" in content_type or "html" in content_type or not content_type:
+            try:
+                body = response.text[:1_500_000]
+            except Exception:
+                body = ""
+        response.close()
+
+        episode = _pocketfm_episode_url_from_text(body)
+        if episode:
+            return episode, current
+
+        break
+
+    return None, current
+
+
 def is_pocketfm_url(url: str) -> bool:
     host = (urlparse(url).hostname or "").lower()
     return host == "pocketfm.com" or host.endswith(".pocketfm.com")
@@ -1386,18 +1490,15 @@ def pocketfm_public_page_info(url: str) -> dict:
     """
     validate_public_http_url(url)
 
-    response = requests.get(
+    response = scoped_get(
         url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 13) "
-                "AppleWebKit/537.36 Chrome/124 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml",
+        accept="text/html,application/xhtml+xml",
+        timeout=30,
+        stream=False,
+        max_redirects=5,
+        extra_headers={
             "Referer": "https://www.pocketfm.com/",
         },
-        timeout=30,
-        allow_redirects=True,
     )
     response.raise_for_status()
 
@@ -1491,18 +1592,15 @@ def pocketfm_public_download(
 def pocketfm_public_show_links(url: str) -> tuple[str, list[str]]:
     validate_public_http_url(url)
 
-    response = requests.get(
+    response = scoped_get(
         url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 13) "
-                "AppleWebKit/537.36 Chrome/124 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml",
+        accept="text/html,application/xhtml+xml",
+        timeout=30,
+        stream=False,
+        max_redirects=5,
+        extra_headers={
             "Referer": "https://www.pocketfm.com/",
         },
-        timeout=30,
-        allow_redirects=True,
     )
     response.raise_for_status()
 
@@ -1684,6 +1782,20 @@ def download_media(
     progress_hook=None,
 ) -> dict:
     validate_public_http_url(url)
+
+    if is_pocketfm_onelink(url):
+        resolved, final_url = resolve_pocketfm_onelink(url)
+        if not resolved:
+            final_host = urlparse(final_url).hostname or "unknown"
+            raise RuntimeError(
+                "This PocketFM OneLink did not expose an episode URL. "
+                f"It resolved to {final_host}. Open the episode page in "
+                "PocketFM/web and share the actual pocketfm.com/episode/... "
+                "link. App Store/Play Store campaign links do not contain "
+                "downloadable episode media."
+            )
+        url = resolved
+        validate_public_http_url(url)
 
     first_error = None
 
@@ -1945,7 +2057,8 @@ def button_media_url(message):
     bot.reply_to(
         message,
         "Send one media URL, or multiple PocketFM /episode/ links "
-        "on separate lines.",
+        "on separate lines. PocketFM OneLink share URLs are resolved when "
+        "they contain an actual episode deep link.",
     )
 
 
