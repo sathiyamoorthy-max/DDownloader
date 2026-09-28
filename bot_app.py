@@ -11,6 +11,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from pathlib import Path
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
@@ -760,63 +761,346 @@ def make_download_progress_hook(
     return hook
 
 
-def send_thumbnail_preview(
-    chat_id: int,
-    thumbnail_url: str | None,
-    title: str,
-    size_bytes: int,
-) -> None:
-    if not thumbnail_url:
-        return
+def safe_media_filename(title: str, suffix: str) -> str:
+    name = clean_title(title, "media")
+    name = re.sub(r'[\\/:*?"<>|\\x00-\\x1f]+', " - ", name)
+    name = re.sub(r"\\s+", " ", name).strip(" .")
+    return (name[:140] or "media") + suffix
+
+
+def probe_media_streams(path: Path) -> dict:
+    fallback_audio = path.suffix.lower() in {
+        ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav"
+    }
+    fallback_video = path.suffix.lower() in {
+        ".mp4", ".mkv", ".webm", ".mov", ".ts"
+    }
+
+    if shutil.which("ffprobe") is None:
+        return {
+            "has_audio": fallback_audio,
+            "has_video": fallback_video,
+            "audio_codec": None,
+        }
 
     try:
-        parsed = urlparse(thumbnail_url)
-        if parsed.scheme not in {"http", "https"}:
-            return
-        bot.send_photo(
-            chat_id=chat_id,
-            photo=thumbnail_url,
-            caption=f"🎵 {clean_title(title)}\n📦 {human_bytes(size_bytes)}",
-            timeout=30,
+        completed = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "stream=codec_type,codec_name",
+                "-of", "json",
+                str(path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
         )
+        if completed.returncode != 0:
+            raise RuntimeError("ffprobe failed")
+
+        payload = json.loads(completed.stdout or "{}")
+        streams = payload.get("streams") or []
+        audio_streams = [
+            item for item in streams
+            if item.get("codec_type") == "audio"
+        ]
+        return {
+            "has_audio": bool(audio_streams),
+            "has_video": any(
+                item.get("codec_type") == "video"
+                for item in streams
+            ),
+            "audio_codec": (
+                audio_streams[0].get("codec_name")
+                if audio_streams else None
+            ),
+        }
     except Exception:
-        logger.info("Thumbnail preview unavailable", exc_info=True)
+        logger.info("Media probing failed for %s", path, exc_info=True)
+        return {
+            "has_audio": fallback_audio,
+            "has_video": fallback_video,
+            "audio_codec": None,
+        }
 
 
-def upload_document_with_progress(
+def prepare_audio_container(
+    path: Path,
+    job_dir: Path,
+) -> Path:
+    probe = probe_media_streams(path)
+    codec = (probe.get("audio_codec") or "").lower()
+
+    if not probe.get("has_audio"):
+        return path
+
+    if codec == "mp3":
+        suffix = ".mp3"
+        codec_args = ["-c:a", "copy"]
+    elif codec in {"aac", "alac"}:
+        suffix = ".m4a"
+        codec_args = ["-c:a", "copy"]
+    else:
+        suffix = ".m4a"
+        codec_args = ["-c:a", "aac", "-b:a", "128k"]
+
+    output = job_dir / ("audio_base" + suffix)
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel", "error",
+        "-y",
+        "-i", str(path),
+        "-map", "0:a:0",
+        "-vn",
+        *codec_args,
+        str(output),
+    ]
+
+    completed = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=60 * 60 * 2,
+    )
+    if (
+        completed.returncode == 0
+        and output.exists()
+        and output.stat().st_size > 0
+    ):
+        return output
+
+    raise RuntimeError(
+        "Audio preparation failed: "
+        + (completed.stderr or "ffmpeg failed")[-900:]
+    )
+
+
+def prepare_telegram_thumbnail(
+    thumbnail_url: str | None,
+    job_dir: Path,
+) -> Path | None:
+    if not thumbnail_url or shutil.which("ffmpeg") is None:
+        return None
+
+    source = job_dir / "thumbnail_source"
+    current = thumbnail_url
+
+    try:
+        for _ in range(5):
+            validate_public_http_url(current)
+            response = requests.get(
+                current,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Linux; Android 13) "
+                        "AppleWebKit/537.36 Chrome/124 Safari/537.36"
+                    )
+                },
+                timeout=30,
+                allow_redirects=False,
+                stream=True,
+            )
+
+            if 300 <= response.status_code < 400:
+                location = response.headers.get("Location")
+                if not location:
+                    return None
+                current = urljoin(current, location)
+                continue
+
+            response.raise_for_status()
+            total = 0
+            with source.open("wb") as target:
+                for chunk in response.iter_content(64 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > 8 * 1024 * 1024:
+                        raise RuntimeError("Thumbnail is too large.")
+                    target.write(chunk)
+            break
+        else:
+            return None
+
+        attempts = [
+            ("320", "8"),
+            ("256", "12"),
+            ("220", "16"),
+        ]
+        for size, quality in attempts:
+            output = job_dir / f"thumbnail_{size}.jpg"
+            completed = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel", "error",
+                    "-y",
+                    "-i", str(source),
+                    "-vf",
+                    f"scale={size}:{size}:force_original_aspect_ratio=decrease",
+                    "-frames:v", "1",
+                    "-q:v", quality,
+                    str(output),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=60,
+            )
+            if (
+                completed.returncode == 0
+                and output.exists()
+                and 0 < output.stat().st_size <= 190 * 1024
+            ):
+                return output
+    except Exception:
+        logger.info("Thumbnail preparation unavailable", exc_info=True)
+
+    return None
+
+
+def finalize_audio_file(
+    path: Path,
+    title: str,
+    thumbnail_path: Path | None,
+    job_dir: Path,
+) -> Path:
+    suffix = ".mp3" if path.suffix.lower() == ".mp3" else ".m4a"
+    output = job_dir / safe_media_filename(title, suffix)
+
+    def run(include_cover: bool):
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-y",
+            "-i", str(path),
+        ]
+        if include_cover and thumbnail_path:
+            cmd.extend(["-i", str(thumbnail_path)])
+
+        cmd.extend(["-map", "0:a:0"])
+
+        if include_cover and thumbnail_path:
+            cmd.extend(["-map", "1:v:0"])
+
+        cmd.extend(["-c:a", "copy"])
+
+        if include_cover and thumbnail_path:
+            cmd.extend(["-c:v", "mjpeg"])
+            if suffix == ".mp3":
+                cmd.extend([
+                    "-id3v2_version", "3",
+                    "-metadata:s:v", "title=Album cover",
+                    "-metadata:s:v", "comment=Cover (front)",
+                ])
+            else:
+                cmd.extend([
+                    "-disposition:v:0", "attached_pic",
+                ])
+
+        cmd.extend([
+            "-metadata", f"title={clean_title(title, path.stem)}",
+            str(output),
+        ])
+
+        return subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60 * 60,
+        )
+
+    completed = run(bool(thumbnail_path))
+    if completed.returncode != 0 and thumbnail_path:
+        completed = run(False)
+
+    if (
+        completed.returncode != 0
+        or not output.exists()
+        or output.stat().st_size <= 0
+    ):
+        raise RuntimeError(
+            "Audio metadata/cover preparation failed: "
+            + (completed.stderr or "ffmpeg failed")[-900:]
+        )
+
+    return output
+
+
+def upload_media_with_progress(
     chat_id: int,
     path: Path,
     title: str,
     user_id: int,
     status_message_id: int,
+    media_kind: str,
+    thumbnail_path: Path | None = None,
 ) -> None:
     size = path.stat().st_size
-    filename = path.name
-    mime = "application/octet-stream"
-    if path.suffix.lower() == ".mp4":
+    suffix = path.suffix.lower()
+
+    if media_kind == "audio":
+        method = "sendAudio"
+        field_name = "audio"
+        mime = (
+            "audio/mpeg"
+            if suffix == ".mp3"
+            else "audio/mp4"
+        )
+        filename = safe_media_filename(title, suffix or ".m4a")
+        caption_icon = "🎵"
+    elif media_kind == "video":
+        method = "sendVideo"
+        field_name = "video"
         mime = "video/mp4"
-    elif path.suffix.lower() in {".mp3", ".m4a", ".aac", ".ogg", ".opus"}:
-        mime = "audio/mpeg"
+        filename = safe_media_filename(title, suffix or ".mp4")
+        caption_icon = "🎬"
+    else:
+        method = "sendDocument"
+        field_name = "document"
+        mime = "application/octet-stream"
+        filename = safe_media_filename(title, suffix or ".bin")
+        caption_icon = "📄"
 
     caption = (
         f"✅ Done\n"
-        f"🎵 {clean_title(title, path.stem)}\n"
+        f"{caption_icon} {clean_title(title, path.stem)}\n"
         f"📦 {human_bytes(size)}"
     )
 
     api_url = (
-        f"{TELEGRAM_API_BASE_URL}/bot{BOT_TOKEN}/sendDocument"
+        f"{TELEGRAM_API_BASE_URL}/bot{BOT_TOKEN}/{method}"
     )
     last = {"time": 0.0}
 
-    with path.open("rb") as media:
-        encoder = MultipartEncoder(
-            fields={
-                "chat_id": str(chat_id),
-                "caption": caption[:1024],
-                "document": (filename, media, mime),
-            }
-        )
+    with ExitStack() as stack:
+        media = stack.enter_context(path.open("rb"))
+        fields = {
+            "chat_id": str(chat_id),
+            "caption": caption[:1024],
+            field_name: (filename, media, mime),
+        }
+
+        if media_kind == "audio":
+            fields["title"] = clean_title(title, path.stem)[:128]
+        elif media_kind == "video":
+            fields["supports_streaming"] = "true"
+
+        if thumbnail_path and thumbnail_path.exists():
+            thumb = stack.enter_context(thumbnail_path.open("rb"))
+            fields["thumbnail"] = (
+                "thumbnail.jpg",
+                thumb,
+                "image/jpeg",
+            )
+
+        encoder = MultipartEncoder(fields=fields)
 
         def on_upload(monitor):
             now = time.time()
@@ -847,12 +1131,11 @@ def upload_document_with_progress(
                 )
 
         monitor = MultipartEncoderMonitor(encoder, on_upload)
-
         response = requests.post(
             api_url,
             data=monitor,
             headers={"Content-Type": monitor.content_type},
-            timeout=(30, 600),
+            timeout=(30, 1200),
         )
 
     response.raise_for_status()
@@ -1385,6 +1668,8 @@ def cmd_start(message):
         f"Active upload limit: {MAX_UPLOAD_MB} MB\n"
         f"Telegram API mode: "
         f"{'official' if OFFICIAL_TELEGRAM_API else 'local/custom'}\n\n"
+        "Audio-only sources are sent as Telegram audio with episode title "
+        "and cover art. Video sources are sent as video with audio. "
         "Large audio files are compressed only when they exceed the "
         "active upload limit. "
         "DRM keys/decryption and protection bypass are not supported."
@@ -1680,21 +1965,54 @@ def process_one_url(
         title = media_info.get("title") or result.stem
         thumbnail = media_info.get("thumbnail")
 
+        probe = probe_media_streams(result)
+        if probe.get("has_video"):
+            media_kind = "video"
+        elif probe.get("has_audio"):
+            media_kind = "audio"
+        else:
+            media_kind = "document"
+
         edit_status(
             message.chat.id,
             status_msg.message_id,
-            f"{prefix}Preparing Telegram-safe file size…",
+            f"{prefix}Preparing Telegram media…",
         )
         set_job(
             user_id,
             "processing",
-            "Compressing oversized audio into one file if needed…",
+            (
+                "Preparing audio title, cover and file size…"
+                if media_kind == "audio"
+                else "Preparing video + audio for Telegram…"
+            ),
         )
+
+        thumbnail_path = prepare_telegram_thumbnail(
+            thumbnail,
+            job_dir,
+        )
+
+        if media_kind == "audio":
+            result = prepare_audio_container(
+                result,
+                job_dir,
+            )
 
         upload_files = prepare_upload_files(
             result,
             job_dir,
         )
+
+        if media_kind == "audio":
+            upload_files = [
+                finalize_audio_file(
+                    upload_files[0],
+                    title,
+                    thumbnail_path,
+                    job_dir,
+                )
+            ]
 
         if any(
             part.stat().st_size > MAX_UPLOAD_BYTES
@@ -1728,13 +2046,6 @@ def process_one_url(
 
         total_upload_size = sum(
             part.stat().st_size for part in upload_files
-        )
-
-        send_thumbnail_preview(
-            message.chat.id,
-            thumbnail,
-            title,
-            total_upload_size,
         )
 
         part_count = len(upload_files)
@@ -1777,15 +2088,21 @@ def process_one_url(
 
             bot.send_chat_action(
                 message.chat.id,
-                "upload_document",
+                (
+                    "upload_video"
+                    if media_kind == "video"
+                    else "upload_document"
+                ),
             )
 
-            upload_document_with_progress(
+            upload_media_with_progress(
                 chat_id=message.chat.id,
                 path=upload_path,
                 title=part_title,
                 user_id=user_id,
                 status_message_id=status_msg.message_id,
+                media_kind=media_kind,
+                thumbnail_path=thumbnail_path,
             )
 
         set_job(
@@ -1794,7 +2111,7 @@ def process_one_url(
             (
                 f"{clean_title(title)} • "
                 f"{human_bytes(total_upload_size)} • "
-                "1 audio file"
+                f"1 {media_kind} file"
             ),
         )
 
