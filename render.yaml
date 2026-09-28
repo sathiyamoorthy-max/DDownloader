@@ -16,11 +16,17 @@ services:
       - key: MAX_UPLOAD_MB
         value: "100"
 
-      - key: TELEGRAM_API_BASE_URL
+      - key: TELEGRAM_API_HOST
         fromService:
           name: telegram-bot-api-local
           type: web
-          envVarKey: RENDER_EXTERNAL_URL
+          property: host
+
+      - key: TELEGRAM_API_PORT
+        fromService:
+          name: telegram-bot-api-local
+          type: web
+          property: port
 
       - key: MAX_VIDEO_HEIGHT
         value: "1080"
