@@ -763,8 +763,8 @@ def make_download_progress_hook(
 
 def safe_media_filename(title: str, suffix: str) -> str:
     name = clean_title(title, "media")
-    name = re.sub(r'[\\/:*?"<>|\\x00-\\x1f]+', " - ", name)
-    name = re.sub(r"\\s+", " ", name).strip(" .")
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', " - ", name)
+    name = re.sub(r"\s+", " ", name).strip(" .")
     return (name[:140] or "media") + suffix
 
 
@@ -968,6 +968,7 @@ def finalize_audio_file(
     title: str,
     thumbnail_path: Path | None,
     job_dir: Path,
+    performer: str | None = None,
 ) -> Path:
     suffix = ".mp3" if path.suffix.lower() == ".mp3" else ".m4a"
     output = job_dir / safe_media_filename(title, suffix)
@@ -1005,8 +1006,12 @@ def finalize_audio_file(
 
         cmd.extend([
             "-metadata", f"title={clean_title(title, path.stem)}",
-            str(output),
         ])
+        if performer:
+            cmd.extend([
+                "-metadata", f"artist={clean_title(performer, 'PocketFM')}",
+            ])
+        cmd.append(str(output))
 
         return subprocess.run(
             cmd,
@@ -1041,6 +1046,7 @@ def upload_media_with_progress(
     status_message_id: int,
     media_kind: str,
     thumbnail_path: Path | None = None,
+    performer: str | None = None,
 ) -> None:
     size = path.stat().st_size
     suffix = path.suffix.lower()
@@ -1089,6 +1095,11 @@ def upload_media_with_progress(
 
         if media_kind == "audio":
             fields["title"] = clean_title(title, path.stem)[:128]
+            if performer:
+                fields["performer"] = clean_title(
+                    performer,
+                    "PocketFM",
+                )[:64]
         elif media_kind == "video":
             fields["supports_streaming"] = "true"
 
@@ -1964,6 +1975,7 @@ def process_one_url(
 
         title = media_info.get("title") or result.stem
         thumbnail = media_info.get("thumbnail")
+        performer = "PocketFM" if is_pocketfm_url(url) else None
 
         probe = probe_media_streams(result)
         if probe.get("has_video"):
@@ -2011,6 +2023,7 @@ def process_one_url(
                     title,
                     thumbnail_path,
                     job_dir,
+                    performer=performer,
                 )
             ]
 
@@ -2103,6 +2116,7 @@ def process_one_url(
                 status_message_id=status_msg.message_id,
                 media_kind=media_kind,
                 thumbnail_path=thumbnail_path,
+                performer=performer,
             )
 
         set_job(
