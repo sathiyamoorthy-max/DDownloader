@@ -22,6 +22,7 @@ RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/python -m pip install -r /app/requirements.txt
 
 COPY bot_app.py /app/bot_app.py
+COPY pocketfm_catalog.py /app/pocketfm_catalog.py
 COPY register_webhook.py /app/register_webhook.py
 COPY start.sh /app/start.sh
 
@@ -33,3 +34,4 @@ RUN chmod +x /app/start.sh \
 EXPOSE 10000
 
 ENTRYPOINT ["/app/start.sh"]
+

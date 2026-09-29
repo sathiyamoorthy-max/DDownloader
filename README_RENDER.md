@@ -102,3 +102,33 @@ licenses or keys, bypass entitlements/paywalls, or decrypt protected streams.
 
 Use `/authstatus` in Telegram to verify that the configuration is present
 without printing any secret values.
+
+
+## PocketFM full-catalogue batch
+
+Send a /show/ URL, wait for the catalogue count, then send:
+
+- `ALL`: every listed episode in one sequential batch, one audio file per episode.
+- `7`: one episode by its actual number.
+- `1-15` or `1 15`: an inclusive range.
+- `/cancel`: stop after the current episode finishes.
+
+The parser reads the public webpage's embedded episode data and follows the
+website's read-only Load more action. It reports the number listed versus the
+show total and warns if pagination fails. ALL never silently means only the
+first 20 or 500 episodes. A failed episode does not stop the remaining batch;
+the final message reports successful, failed and unattempted counts.
+
+Catalogue visibility does not guarantee media access. Locked episodes and
+unavailable/protected media fail individually. Episode extraction selects only
+the requested story, preventing accidental downloads of recommended episodes.
+OneLink store/app redirects are handled without attempting a non-HTTP request;
+a share link that contains no episode destination still needs an episode URL.
+
+Selection expires after one hour. Selection and active batches are in memory:
+a Render restart/deploy interrupts them. Large batches can take many hours.
+This is a download batch, not a backup of PocketFM account state or a merged
+single audio file.
+
+Run offline regression tests with `python -m unittest discover -s tests -v`.
+
