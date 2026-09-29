@@ -23,6 +23,8 @@ RUN python3 -m venv /opt/venv \
 
 COPY bot_app.py /app/bot_app.py
 COPY pocketfm_catalog.py /app/pocketfm_catalog.py
+COPY kuku_catalog.py /app/kuku_catalog.py
+COPY runtime_checks.py /app/runtime_checks.py
 COPY register_webhook.py /app/register_webhook.py
 COPY start.sh /app/start.sh
 

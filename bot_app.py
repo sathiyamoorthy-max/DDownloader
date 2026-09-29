@@ -24,6 +24,8 @@ from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
+from kuku_catalog import show_slug as kuku_show_slug, get_catalog as kuku_get_catalog, refresh_episode as kuku_refresh_episode
+from runtime_checks import system_status, check_download_environment
 from pocketfm_catalog import (
     PageParser, page_values, catalog_from_values, episode_action_id,
     action_catalog, select_entries, episode_metadata, public_episode_candidates,
@@ -100,6 +102,8 @@ AUTH_DOMAINS = {
 AUTH_COOKIE = os.getenv("AUTH_COOKIE", "").strip()
 AUTHORIZATION_HEADER = os.getenv("AUTHORIZATION_HEADER", "").strip()
 AUTH_REFERER = os.getenv("AUTH_REFERER", "").strip()
+KUKU_COOKIE = os.getenv("KUKU_COOKIE", "").strip()
+MIN_FREE_DISK_MB = max(0, int(os.getenv("MIN_FREE_DISK_MB", "256")))
 
 _raw_allowed = os.getenv("ALLOWED_USER_IDS", "").strip()
 ALLOWED_USER_IDS = {
@@ -183,7 +187,7 @@ def get_main_menu():
     )
     markup.row(
         KeyboardButton("📥 Media URL"),
-        KeyboardButton("🔍 PocketFM Series"),
+        KeyboardButton("🔍 Series"),
     )
     markup.row(
         KeyboardButton("📊 Status"),
@@ -234,6 +238,8 @@ def extract_url(text: str):
 
 def auth_headers_for_url(url: str) -> dict:
     host = (urlparse(url).hostname or "").lower()
+    if host in {"kukufm.com", "www.kukufm.com"} and KUKU_COOKIE:
+        return {"Cookie": KUKU_COOKIE} if urlparse(url).scheme == "https" else {}
     if not host or not AUTH_DOMAINS:
         return {}
 
@@ -1912,6 +1918,30 @@ def prepare_upload_files(
         )
     ]
 
+def kuku_fetch_json(url):
+    if (KUKU_COOKIE or any(k in auth_headers_for_url(url) for k in ("Cookie", "Authorization"))) and not ALLOWED_USER_IDS:
+        raise RuntimeError("Set ALLOWED_USER_IDS before using a private Kuku FM session.")
+    response = scoped_get(url, accept="application/json", timeout=30)
+    try:
+        if response.status_code in {401, 403}:
+            raise RuntimeError("Kuku FM refused access. Check the KUKU_COOKIE session and account access.")
+        response.raise_for_status()
+        return response.json()
+    except ValueError as exc:
+        raise RuntimeError("Kuku FM returned an unsupported response instead of episode data.") from exc
+    finally:
+        response.close()
+
+
+def kuku_download_entry(entry, job_dir, progress_hook=None):
+    current, page = kuku_refresh_episode(entry, kuku_fetch_json)
+    validate_public_http_url(current["media_url"])
+    result = download_public_candidate(current["media_url"], job_dir, progress_hook=progress_hook)
+    result.update(title=current["title"], thumbnail=page.get("thumbnail"),
+                  performer=page["title"])
+    return result
+
+
 def download_media(
     url: str,
     job_dir: Path,
@@ -2021,7 +2051,7 @@ def cmd_start(message):
         return
 
     text = (
-        "DDownloader + PocketFM Bot ✅\n\n"
+        "DDownloader • PocketFM + Kuku FM ✅\n\n"
         "Send a public/authorized media URL. PocketFM episode links are "
         "checked against the requested episode metadata. Send a show link "
         "and then ALL to download every listed episode in one batch.\n\n"
@@ -2029,6 +2059,7 @@ def cmd_start(message):
         "/status - live download/upload progress\n"
         "/cancel - stop a batch after the current episode\n"
         "/episodes 1 - episode list with Public/Locked status\n"
+        "/system - binaries and free disk space\n"
         "/whoami - show your Telegram user ID\n"
         "/inspect <url> - inspect manifest/DRM markers\n"
         "/authstatus - show authorized-download config status\n"
@@ -2150,9 +2181,24 @@ def cmd_authstatus(message):
             f"Authorization header present: "
             f"{'yes' if AUTHORIZATION_HEADER else 'no'}\n"
             f"Referer present: {'yes' if AUTH_REFERER else 'no'}\n\n"
+            f"Kuku FM cookie configured: {'yes' if KUKU_COOKIE else 'no'}\n"
+            "Configured does not mean login has been verified.\n"
             "Secrets are never shown. DRM/license/key bypass is not supported."
         ),
     )
+
+
+@bot.message_handler(commands=["system"])
+def cmd_system(message):
+    if not allowed_user(message):
+        return
+    try:
+        status = system_status(DOWNLOAD_ROOT)
+        text = ("Binaries: " + (", ".join(status["missing"]) + " missing" if status["missing"] else "ffmpeg / ffprobe OK")
+                + f"\nFree disk: {status['free_mb']} MB\nRequired reserve: {MIN_FREE_DISK_MB} MB")
+    except OSError:
+        text = "Could not access the download folder."
+    bot.reply_to(message, text)
 
 
 @bot.message_handler(commands=["status"])
@@ -2191,11 +2237,11 @@ def button_media_url(message):
     )
 
 
-@bot.message_handler(func=lambda message: message.text == "🔍 PocketFM Series")
+@bot.message_handler(func=lambda message: message.text in {"🔍 PocketFM Series", "🔍 Series"})
 def button_pocket_series(message):
     bot.reply_to(
         message,
-        "Send a PocketFM /show/ link. Then send ALL for one batch, "
+        "Send a PocketFM or Kuku FM show link. Then send ALL for one batch, "
         "an episode number, or a range such as 1-15.",
     )
 
@@ -2220,14 +2266,22 @@ def extract_pocketfm_show_url(text):
     return None
 
 
-@bot.message_handler(func=lambda message: bool(extract_pocketfm_show_url(message.text)))
+def extract_series_url(text):
+    for raw in URL_RE.findall(text or ""):
+        url = raw.rstrip(").,]}>\"'")
+        if extract_pocketfm_show_url(url) or kuku_show_slug(url):
+            return url
+    return None
+
+
+@bot.message_handler(func=lambda message: bool(extract_series_url(message.text)))
 def handle_pocket_show(message):
     if not allowed_user(message) or not message.from_user:
         return
 
-    url = extract_pocketfm_show_url(message.text or "")
+    url = extract_series_url(message.text or "")
     if not url:
-        bot.reply_to(message, "Send a valid PocketFM show URL.")
+        bot.reply_to(message, "Send a full PocketFM or Kuku FM show URL.")
         return
 
     with _pocket_states_guard:
@@ -2244,7 +2298,12 @@ def handle_pocket_show(message):
                 edit_status(message.chat.id, status_message.message_id,
                             f"Reading episode list: {count}/{total or '?'}…")
                 last_update[0] = time.monotonic()
-        catalog = pocketfm_public_show_catalog(url, progress=progress)
+        provider = "kuku" if kuku_show_slug(url) else "pocketfm"
+        if provider == "kuku":
+            catalog = kuku_get_catalog(url, kuku_fetch_json, progress=progress,
+                                       session=any(k in auth_headers_for_url("https://kukufm.com") for k in ("Cookie", "Authorization")))
+        else:
+            catalog = pocketfm_public_show_catalog(url, progress=progress)
         entries = catalog["entries"]
         title = catalog["title"]
         if not entries:
@@ -2259,6 +2318,7 @@ def handle_pocket_show(message):
         with _pocket_states_guard:
             _pocket_states[message.from_user.id] = {
                 "title": title,
+                "provider": provider,
                 "entries": entries,
                 "session_request": catalog.get("session_request", False),
                 "chat_id": message.chat.id,
@@ -2332,8 +2392,10 @@ def process_pocket_range(message):
         return
     process_url_batch(
         message, [e["url"] for e in selected],
-        batch_label="PocketFM batch", performer_override=state.get("title"),
+        batch_label="Kuku FM batch" if state.get("provider") == "kuku" else "PocketFM batch",
+        performer_override=state.get("title"),
         episode_numbers=[e["number"] for e in selected],
+        media_entries=selected if state.get("provider") == "kuku" else None,
     )
 
 
@@ -2356,6 +2418,7 @@ def process_one_url(
     user_id: int,
     sequence_text: str = "",
     performer_override: str | None = None,
+    media_entry: dict | None = None,
 ) -> bool:
     job_id = f"{user_id}_{message.message_id}_{uuid.uuid4().hex[:8]}"
     job_dir = DOWNLOAD_ROOT / job_id
@@ -2375,6 +2438,7 @@ def process_one_url(
         )
 
         with _download_slots:
+            check_download_environment(DOWNLOAD_ROOT, MIN_FREE_DISK_MB)
             set_job(
                 user_id,
                 "downloading",
@@ -2392,11 +2456,10 @@ def process_one_url(
                 status_msg.message_id,
             )
 
-            media_info = download_media(
-                url,
-                job_dir,
-                progress_hook=progress_hook,
-            )
+            if media_entry and media_entry.get("provider") == "kuku":
+                media_info = kuku_download_entry(media_entry, job_dir, progress_hook)
+            else:
+                media_info = download_media(url, job_dir, progress_hook=progress_hook)
             result = media_info["path"]
 
         title = media_info.get("title") or result.stem
@@ -2420,6 +2483,7 @@ def process_one_url(
         pocketfm_audio_source = (
             is_pocketfm_url(url)
             or is_pocketfm_onelink(url)
+            or bool(media_entry and media_entry.get("provider") == "kuku")
         )
 
         if pocketfm_audio_source and probe.get("has_audio"):
@@ -2440,7 +2504,7 @@ def process_one_url(
             user_id,
             "processing",
             (
-                "Preparing PocketFM audio card…"
+                "Preparing series audio card…"
                 if media_kind == "audio" and pocketfm_audio_source
                 else (
                     "Preparing audio title, cover and file size…"
@@ -2622,6 +2686,7 @@ def process_url_batch(
     batch_label: str = "",
     performer_override: str | None = None,
     episode_numbers: list[int] | None = None,
+    media_entries: list[dict] | None = None,
 ):
     if not message.from_user:
         return
@@ -2664,6 +2729,7 @@ def process_url_batch(
                 user_id,
                 sequence_text=sequence,
                 performer_override=performer_override,
+                media_entry=media_entries[index - 1] if media_entries else None,
             ):
                 success += 1
             else:

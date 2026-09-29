@@ -151,3 +151,36 @@ This bot does not implement phone/OTP login. Existing domain-scoped environment
 credentials can be used for authorized webpage requests, but PocketFM account
 login, app/web entitlement synchronization, and paid media downloads have not
 been verified. Never post OTPs or session cookies to Telegram, GitHub or a chat.
+
+## Combined PocketFM + Kuku FM bot
+
+The Series button accepts either provider's full show URL. Both use the same
+`ALL`, episode/range, `/episodes N` and `/cancel` flow. Kuku FM episode URLs are
+refreshed from their catalogue page before each download, so expired signed media
+links and changed account access are checked again. Existing Telegram audio cover,
+title, compression and upload handling are reused.
+
+Kuku FM uses `KUKU_COOKIE`, a raw HTTP Cookie header stored only in the service's
+secret environment settings (not a Netscape cookies.txt file). Set
+`ALLOWED_USER_IDS` to the owner's Telegram user ID before using this private
+session. No cookie is needed to attempt publicly returned catalogue metadata.
+A PocketFM purchase does not grant Kuku FM access; use your own Kuku FM account.
+`/authstatus` reports configuration presence, not verified account login.
+
+KUKU_COOKIE is attached only to HTTPS requests for kukufm.com / www.kukufm.com.
+It is not forwarded to PocketFM or media CDNs. The adapter supports media URLs
+returned to that session through the existing non-decrypting downloader. It does
+not support DRM decryption, app-only short links, buying/unlocking episodes,
+or media requiring extra CDN authentication. Missing access flags remain Unknown.
+
+`/system` reports ffmpeg/ffprobe availability and free disk space. Before every
+download, the bot checks both binaries, folder writability and the free-space
+reserve set by `MIN_FREE_DISK_MB` (default 256). This reserve is a preflight check,
+not a guarantee that an arbitrarily large episode will fit. Failures are reported
+in Telegram without exiting the bot process.
+
+The Kuku adapter was independently implemented against the API shape described
+in https://github.com/bunnykek/kuku-dl and verified against a public catalogue
+response. Upstream cookies, executables and source files are not bundled.
+Paid account playback and end-to-end Telegram uploads still require testing
+with the owner's privately configured session.
