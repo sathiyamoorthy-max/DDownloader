@@ -26,6 +26,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 from kuku_catalog import show_slug as kuku_show_slug, get_catalog as kuku_get_catalog, refresh_episode as kuku_refresh_episode
 from runtime_checks import system_status, check_download_environment
+from pocketfm_api import get_catalog as pocket_api_catalog, refresh_episode as pocket_api_refresh, API_HOST as POCKET_API_HOST, API_PATH as POCKET_API_PATH
 from pocketfm_catalog import (
     PageParser, page_values, catalog_from_values, episode_action_id,
     action_catalog, select_entries, episode_metadata, public_episode_candidates,
@@ -103,6 +104,7 @@ AUTH_COOKIE = os.getenv("AUTH_COOKIE", "").strip()
 AUTHORIZATION_HEADER = os.getenv("AUTHORIZATION_HEADER", "").strip()
 AUTH_REFERER = os.getenv("AUTH_REFERER", "").strip()
 KUKU_COOKIE = os.getenv("KUKU_COOKIE", "").strip()
+POCKETFM_ACCESS_TOKEN = os.getenv("POCKETFM_ACCESS_TOKEN", "").strip()
 MIN_FREE_DISK_MB = max(0, int(os.getenv("MIN_FREE_DISK_MB", "256")))
 
 _raw_allowed = os.getenv("ALLOWED_USER_IDS", "").strip()
@@ -240,6 +242,9 @@ def auth_headers_for_url(url: str) -> dict:
     host = (urlparse(url).hostname or "").lower()
     if host in {"kukufm.com", "www.kukufm.com"} and KUKU_COOKIE:
         return {"Cookie": KUKU_COOKIE} if urlparse(url).scheme == "https" else {}
+    if (host == POCKET_API_HOST and urlparse(url).scheme == "https"
+            and urlparse(url).path == POCKET_API_PATH):
+        return {"access-token": POCKETFM_ACCESS_TOKEN} if POCKETFM_ACCESS_TOKEN else {}
     if not host or not AUTH_DOMAINS:
         return {}
 
@@ -1918,6 +1923,52 @@ def prepare_upload_files(
         )
     ]
 
+def pocket_api_fetch_json(url):
+    if POCKETFM_ACCESS_TOKEN and not ALLOWED_USER_IDS:
+        raise RuntimeError("Set ALLOWED_USER_IDS before using a PocketFM account token.")
+    response = scoped_get(url, accept="application/json", timeout=30,
+                          extra_headers={"app-client": "consumer-web", "platform": "web",
+                                         "auth-token": "web-auth"})
+    try:
+        if response.status_code in {401, 403}:
+            raise RuntimeError("PocketFM API refused access. Check POCKETFM_ACCESS_TOKEN and account access.")
+        response.raise_for_status()
+        return response.json()
+    except ValueError as exc:
+        raise RuntimeError("PocketFM API returned an unsupported response.") from exc
+    finally:
+        response.close()
+
+
+def pocket_catalog_with_api(url, progress=None):
+    try:
+        return pocket_api_catalog(url, pocket_api_fetch_json, progress,
+                                  session=bool(POCKETFM_ACCESS_TOKEN))
+    except Exception:
+        if POCKETFM_ACCESS_TOKEN:
+            # Do not silently substitute guest access for an invalid account.
+            raise
+        catalog = pocketfm_public_show_catalog(url, progress)
+        catalog["provider"] = "pocketfm"
+        catalog["warning"] = ("Guest API unavailable; showing the public website catalogue. "
+                              + catalog.get("warning", ""))
+        return catalog
+
+
+def pocket_api_download_entry(entry, job_dir, progress_hook=None):
+    current, page = pocket_api_refresh(entry, pocket_api_fetch_json)
+    for candidate in current["media_candidates"]:
+        try:
+            validate_public_http_url(candidate)
+            result = download_public_candidate(candidate, job_dir, progress_hook=progress_hook)
+            result.update(title=current["title"], thumbnail=page.get("thumbnail"),
+                          performer=page.get("title") or "PocketFM")
+            return result
+        except Exception:
+            continue
+    raise RuntimeError("The account API returned media, but no supported candidate could be downloaded.")
+
+
 def kuku_fetch_json(url):
     if (KUKU_COOKIE or any(k in auth_headers_for_url(url) for k in ("Cookie", "Authorization"))) and not ALLOWED_USER_IDS:
         raise RuntimeError("Set ALLOWED_USER_IDS before using a private Kuku FM session.")
@@ -2182,6 +2233,7 @@ def cmd_authstatus(message):
             f"{'yes' if AUTHORIZATION_HEADER else 'no'}\n"
             f"Referer present: {'yes' if AUTH_REFERER else 'no'}\n\n"
             f"Kuku FM cookie configured: {'yes' if KUKU_COOKIE else 'no'}\n"
+            f"PocketFM API token configured: {'yes' if POCKETFM_ACCESS_TOKEN else 'no'}\n"
             "Configured does not mean login has been verified.\n"
             "Secrets are never shown. DRM/license/key bypass is not supported."
         ),
@@ -2303,7 +2355,8 @@ def handle_pocket_show(message):
             catalog = kuku_get_catalog(url, kuku_fetch_json, progress=progress,
                                        session=any(k in auth_headers_for_url("https://kukufm.com") for k in ("Cookie", "Authorization")))
         else:
-            catalog = pocketfm_public_show_catalog(url, progress=progress)
+            catalog = pocket_catalog_with_api(url, progress=progress)
+            provider = catalog.get("provider", "pocketfm")
         entries = catalog["entries"]
         title = catalog["title"]
         if not entries:
@@ -2395,7 +2448,7 @@ def process_pocket_range(message):
         batch_label="Kuku FM batch" if state.get("provider") == "kuku" else "PocketFM batch",
         performer_override=state.get("title"),
         episode_numbers=[e["number"] for e in selected],
-        media_entries=selected if state.get("provider") == "kuku" else None,
+        media_entries=selected if state.get("provider") in {"kuku", "pocketfm_api"} else None,
     )
 
 
@@ -2458,6 +2511,8 @@ def process_one_url(
 
             if media_entry and media_entry.get("provider") == "kuku":
                 media_info = kuku_download_entry(media_entry, job_dir, progress_hook)
+            elif media_entry and media_entry.get("provider") == "pocketfm_api":
+                media_info = pocket_api_download_entry(media_entry, job_dir, progress_hook)
             else:
                 media_info = download_media(url, job_dir, progress_hook=progress_hook)
             result = media_info["path"]

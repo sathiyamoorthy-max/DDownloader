@@ -184,3 +184,25 @@ in https://github.com/bunnykek/kuku-dl and verified against a public catalogue
 response. Upstream cookies, executables and source files are not bundled.
 Paid account playback and end-to-end Telegram uploads still require testing
 with the owner's privately configured session.
+
+## Direct API selection for both services
+
+Kuku FM uses its `/api/v2.3/channels/{show}/episodes/` endpoint.
+PocketFM show links now try `https://api.pocketfm.com/v2/content_api/show.get_details`
+first. Set `POCKETFM_ACCESS_TOKEN` privately in the service environment to request
+your account's catalogue; the bot sends it as the `access-token` header only to
+that exact HTTPS host and endpoint. `ALLOWED_USER_IDS` is required for account
+access. Do not paste token values into chat, GitHub or the repository.
+
+Without a PocketFM token, API failure falls back to the public website catalogue
+with an explicit guest-source notice. With a token, an API failure is reported
+rather than silently substituting guest results. API-selected episode metadata
+and URLs are refreshed before download, preserving lock checks and episode IDs.
+`/authstatus` reports whether both providers' credentials are configured; this is
+not a validation of login or entitlement. Individual PocketFM episode links still
+use the existing webpage flow; the direct API flow is for show selections.
+
+PocketFM's account API integration has offline fixture coverage but still needs
+validation with a real owner-provided token. The older web.pocketfm.com host
+returned HTTP 502 in this environment. No account credentials were supplied or
+configured during development, and no deployment was performed.
