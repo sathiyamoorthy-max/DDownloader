@@ -27,6 +27,7 @@ from yt_dlp.utils import DownloadError
 from pocketfm_catalog import (
     PageParser, page_values, catalog_from_values, episode_action_id,
     action_catalog, select_entries, episode_metadata, public_episode_candidates,
+    episode_access, access_summary, episode_list_page,
 )
 
 
@@ -1612,7 +1613,7 @@ def pocketfm_public_page_info(url: str) -> dict:
     if story:
         # Do not fall through to unrelated/recommended episode media when this
         # episode needs unlocking or exposes no playable media.
-        if story.get("is_locked") or story.get("coins_required", 0):
+        if story.get("is_locked") is True or episode_access(story) == "locked":
             raise RuntimeError("This PocketFM episode requires unlocking in your account.")
         return {
             "title": clean_title(story["story_title"], "Pocket FM"),
@@ -1682,12 +1683,17 @@ def pocketfm_public_show_catalog(url: str, progress=None) -> dict:
     parser.feed(html)
     catalog["title"] = catalog["title"] or parser.title or "Pocket FM Series"
     catalog["warning"] = ""
+    # Sending credentials does not prove login succeeded. Describe the source
+    # as a session request, never claim the user is authenticated.
+    catalog["session_request"] = any(
+        name in auth_headers_for_url(page_url) for name in ("Cookie", "Authorization")
+    )
     # Preserve compatibility with older pages which expose ordinary links.
     if not catalog["entries"]:
         matches = re.findall(r'/episode/([A-Za-z0-9_-]+)', html.replace("\\/", "/"))
         catalog["entries"] = [
             {"id": sid, "number": i, "title": f"Episode {i}",
-             "url": "https://pocketfm.com/episode/" + sid}
+             "url": "https://pocketfm.com/episode/" + sid, "access": "unknown"}
             for i, sid in enumerate(dict.fromkeys(matches), 1)
         ]
         catalog["total"] = 0
@@ -2022,6 +2028,7 @@ def cmd_start(message):
         "Commands:\n"
         "/status - live download/upload progress\n"
         "/cancel - stop a batch after the current episode\n"
+        "/episodes 1 - episode list with Public/Locked status\n"
         "/whoami - show your Telegram user ID\n"
         "/inspect <url> - inspect manifest/DRM markers\n"
         "/authstatus - show authorized-download config status\n"
@@ -2203,22 +2210,31 @@ def button_help(message):
     cmd_start(message)
 
 
-@bot.message_handler(
-    func=lambda message: bool(message.text)
-    and "pocketfm.com/show/" in message.text.lower()
-)
+def extract_pocketfm_show_url(text):
+    for raw in URL_RE.findall(text or ""):
+        url = raw.rstrip(").,]}>\"'")
+        if is_pocketfm_url(url) and re.match(
+            r"^/(?:[a-z]{2}-[a-z]{2}/)?show/[^/]+", urlparse(url).path, re.I
+        ):
+            return url
+    return None
+
+
+@bot.message_handler(func=lambda message: bool(extract_pocketfm_show_url(message.text)))
 def handle_pocket_show(message):
     if not allowed_user(message) or not message.from_user:
         return
 
-    url = extract_url(message.text or "")
+    url = extract_pocketfm_show_url(message.text or "")
     if not url:
         bot.reply_to(message, "Send a valid PocketFM show URL.")
         return
 
+    with _pocket_states_guard:
+        _pocket_states.pop(message.from_user.id, None)
     status_message = bot.reply_to(
         message,
-        "🔍 Reading public series page…",
+        "🔍 Reading series episodes and access status…",
     )
 
     try:
@@ -2244,6 +2260,7 @@ def handle_pocket_show(message):
             _pocket_states[message.from_user.id] = {
                 "title": title,
                 "entries": entries,
+                "session_request": catalog.get("session_request", False),
                 "chat_id": message.chat.id,
                 "created": time.time(),
             }
@@ -2253,6 +2270,10 @@ def handle_pocket_show(message):
             status_message.message_id,
             f"🎧 {title}\n"
             f"Episodes listed: {len(entries)}/{catalog['total'] or '?'}\n"
+            + access_summary(entries, catalog.get("session_request", False)) + "\n"
+            + ("Source: configured session request (login not verified).\n"
+               if catalog.get("session_request") else "Source: public website, not your app account.\n")
+            + "Access labels are page metadata, not a download guarantee.\n"
             + (catalog["warning"] + "\n\n" if catalog["warning"] else "\n")
             + "Send ALL for every listed episode in one batch.\n"
             "Or send 7, 1-15, or 1 15.\n"
@@ -2260,12 +2281,37 @@ def handle_pocket_show(message):
             "Locked/unavailable episodes are reported as failed.\n"
             "Use /cancel to stop after the current episode.",
         )
+        bot.reply_to(message, episode_list_page(
+            entries, session=catalog.get("session_request", False)
+        ))
     except Exception as exc:
         edit_status(
             message.chat.id,
             status_message.message_id,
             "Series read failed.\n\n" + safe_error(exc),
         )
+
+
+@bot.message_handler(commands=["episodes"])
+def cmd_episodes(message):
+    if not allowed_user(message) or not message.from_user:
+        return
+    with _pocket_states_guard:
+        state = dict(_pocket_states.get(message.from_user.id, {}))
+    if (not state.get("entries") or state.get("chat_id") != message.chat.id
+            or time.time() - state.get("created", 0) > 3600):
+        bot.reply_to(message, "Send the show link again to load the episode list.")
+        return
+    try:
+        parts = (message.text or "").split()
+        if len(parts) > 2:
+            raise ValueError("Use /episodes 1")
+        page = int(parts[1]) if len(parts) == 2 else 1
+        text = episode_list_page(state["entries"], page, state.get("session_request", False))
+    except ValueError:
+        bot.reply_to(message, "Use /episodes followed by a valid page number, e.g. /episodes 1.")
+        return
+    bot.reply_to(message, text)
 
 
 def process_pocket_range(message):

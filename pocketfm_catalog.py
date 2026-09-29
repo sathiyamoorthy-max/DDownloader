@@ -77,6 +77,49 @@ def objects(value):
             stack.extend(reversed(item))
 
 
+def episode_access(story):
+    """Classify only explicit access metadata, never infer access from a URL."""
+    locked, unlocked = story.get("is_locked"), story.get("is_unlocked")
+    if locked is True:
+        return "unknown" if unlocked is True else "locked"
+    if locked is False or unlocked is True:
+        return "available"
+    coins = story.get("coins_required")
+    if isinstance(coins, (int, float)) and not isinstance(coins, bool):
+        if coins > 0:
+            return "locked"
+        if coins == 0:
+            return "available"
+    return "unknown"
+
+
+def access_label(access, session=False):
+    if access == "available":
+        return "🟢 Available (session)" if session else "🟢 Public"
+    return "🔒 Locked" if access == "locked" else "❔ Unknown"
+
+
+def access_summary(entries, session=False):
+    counts = {key: 0 for key in ("available", "locked", "unknown")}
+    for entry in entries:
+        counts[entry.get("access", "unknown")] += 1
+    return " | ".join(f"{access_label(key, session)}: {count}" for key, count in counts.items())
+
+
+def episode_list_page(entries, page=1, session=False):
+    page_size = 20
+    pages = max(1, (len(entries) + page_size - 1) // page_size)
+    if page < 1 or page > pages:
+        raise ValueError(f"Choose a page from 1 to {pages}: /episodes 1")
+    lines = [f"Episodes — page {page}/{pages}"]
+    for entry in entries[(page - 1) * page_size:page * page_size]:
+        title = " ".join(str(entry.get("title", "")).split())[:70]
+        lines.append(f"{entry['number']}. {access_label(entry.get('access'), session)} — {title}")
+    if page < pages:
+        lines.append(f"Next: /episodes {page + 1}")
+    return "\n".join(lines)
+
+
 def catalog_from_values(values, show_id):
     entries = {}
     total = 0
@@ -110,6 +153,7 @@ def catalog_from_values(values, show_id):
                     "id": story_id, "number": number,
                     "title": story.get("story_title") or f"Episode {number}",
                     "url": "https://pocketfm.com/episode/" + story_id,
+                    "access": episode_access(story),
                 }
     return {
         "title": title, "total": total, "next_ptr": next_ptr,

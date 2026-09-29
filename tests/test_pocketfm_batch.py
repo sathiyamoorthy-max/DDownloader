@@ -13,6 +13,7 @@ from urllib.parse import urlparse, urljoin, unquote, parse_qs
 from pocketfm_catalog import (
     page_values, catalog_from_values, action_catalog, select_entries,
     episode_action_id, episode_metadata, public_episode_candidates,
+    episode_access, access_summary, episode_list_page,
 )
 
 SHOW = 'test-show'
@@ -46,6 +47,37 @@ def functions(*names, **values):
     return ns
 
 class CatalogueTests(unittest.TestCase):
+    def test_access_is_explicit_and_session_sensitive(self):
+        for item, expected in [
+            ({"coins_required": 0}, "available"),
+            ({"coins_required": 11}, "locked"),
+            ({"is_locked": True, "coins_required": 0}, "locked"),
+            ({"is_locked": False, "coins_required": 11}, "available"),
+            ({"is_unlocked": True, "coins_required": 11}, "available"),
+            ({"is_locked": True, "is_unlocked": True}, "unknown"),
+            ({"media_url": "https://example.com/audio.mp3"}, "unknown"),
+            ({}, "unknown"),
+        ]:
+            self.assertEqual(episode_access(item), expected)
+        data = payload([1, 2, 3])
+        data['stories'][0]['coins_required'] = 0
+        data['stories'][1]['is_locked'] = True
+        cat = catalog_from_values([data], SHOW)
+        self.assertEqual([e['access'] for e in cat['entries']], ['available', 'locked', 'unknown'])
+        self.assertIn('Public: 1', access_summary(cat['entries']))
+        self.assertNotIn('Public', access_summary(cat['entries'], session=True))
+
+    def test_episode_pages_fit_telegram_and_do_not_omit_entries(self):
+        entries = catalog_from_values([payload(range(1, 641))], SHOW)['entries']
+        for e in entries: e['title'] = 'Long title ' * 80
+        first = episode_list_page(entries)
+        last = episode_list_page(entries, 32)
+        self.assertLess(len(first.encode('utf-16-le')) // 2, 4096)
+        self.assertIn('Next: /episodes 2', first)
+        self.assertIn('640.', last)
+        self.assertNotIn('Next:', last)
+        with self.assertRaises(ValueError): episode_list_page(entries, 33)
+
     def test_split_react_chunks_parentheses_dedup_order_and_show_scope(self):
         data = [payload([3, 1, 2]), payload([1]), dict(payload([9]), show_id='other')]
         cat = catalog_from_values(page_values(html_page(data, True)), SHOW)
@@ -108,6 +140,7 @@ class CatalogueTests(unittest.TestCase):
             PageParser=PageParser, page_values=page_values, catalog_from_values=catalog_from_values,
             episode_action_id=episode_action_id, action_catalog=action_catalog,
             _pocket_action_cache={}, request_headers_for_url=lambda *a: {},
+            auth_headers_for_url=lambda *a: {},
             requests=SimpleNamespace(post=Mock(side_effect=post)), logger=logging.getLogger('test'))
         cat = ns['pocketfm_public_show_catalog'](response.url)
         self.assertEqual(len(cat['entries']), 640)
@@ -122,6 +155,15 @@ class CatalogueTests(unittest.TestCase):
         self.assertTrue(cat['warning'])
 
 class BotTests(unittest.TestCase):
+    def test_show_link_routing_accepts_www_locale_and_surrounding_text(self):
+        ns = functions('extract_pocketfm_show_url', 'is_pocketfm_url',
+                       URL_RE=re.compile(r"https?://[^\s<>]+", re.I))
+        for link in ['https://pocketfm.com/show/abc',
+                     'https://www.pocketfm.com/show/abc?x=1',
+                     'https://pocketfm.com/en-us/show/abc']:
+            self.assertEqual(ns['extract_pocketfm_show_url']('https://example.com first '+link), link)
+        self.assertIsNone(ns['extract_pocketfm_show_url']('https://pocketfm.com.evil.test/show/abc'))
+
     def test_non_http_redirect_does_not_abort_other_profiles(self):
         calls = []
         def get(url, **kwargs):

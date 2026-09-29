@@ -132,3 +132,22 @@ single audio file.
 
 Run offline regression tests with `python -m unittest discover -s tests -v`.
 
+
+
+## Episode availability labels
+
+A show URL now displays Public / Locked / Unknown totals and the first page of
+per-episode titles and labels. Use `/episodes 2`, `/episodes 3`, etc. to browse
+20 entries per page. Standard, www and language-prefixed show URLs are accepted.
+
+Labels come from explicit episode access metadata, not from the presence of a
+media URL. Missing or conflicting metadata is Unknown. If the show request uses
+configured Cookie or Authorization headers, the label is Available (session),
+not Public, and the UI says that login has not been verified. Without credentials,
+the catalogue is the public website view and does not reflect app purchases.
+An explicit unlocked flag takes precedence over a nonzero coin price.
+
+This bot does not implement phone/OTP login. Existing domain-scoped environment
+credentials can be used for authorized webpage requests, but PocketFM account
+login, app/web entitlement synchronization, and paid media downloads have not
+been verified. Never post OTPs or session cookies to Telegram, GitHub or a chat.
