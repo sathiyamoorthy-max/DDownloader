@@ -102,3 +102,177 @@ licenses or keys, bypass entitlements/paywalls, or decrypt protected streams.
 
 Use `/authstatus` in Telegram to verify that the configuration is present
 without printing any secret values.
+
+
+## PocketFM full-catalogue batch
+
+Before uploading audio, the bot decodes the entire final audio stream with
+FFmpeg (15-minute validation timeout). It rejects decoder errors even when
+FFmpeg returns exit code zero. This prevents sending an unplayable file that
+has readable duration/codec metadata and passes stream-copy remuxing. Validation
+does not repair damaged or protected source audio; a valid playable source is
+still required. Decoder details and media contents are not sent to Telegram.
+
+### PocketFM website cookies
+
+Set `POCKETFM_COOKIE` in the service environment to your own single-line HTTP
+Cookie header value (`name=value; another=value`). Do not include the `Cookie:`
+prefix or paste a Netscape/JSON cookie file. `ALLOWED_USER_IDS` must be set.
+The dedicated cookie is sent only to HTTPS `pocketfm.com` and `www.pocketfm.com`,
+never to Kuku, media CDNs or the PocketFM API host. It overrides the generic
+AUTH_COOKIE on those website hosts. `/authstatus` reports presence only.
+
+This supplies a website session, not a substitute for `POCKETFM_ACCESS_TOKEN`
+on the direct API. With no API token, guest API failures fall back to the website
+and mark cookie requests as a configured session, not verified login. With an
+API token configured, API authentication errors are still reported. A cookie
+may expire or be insufficient for paid playback. Paid-account downloads have
+not yet been verified; do not commit cookies or share them in chat.
+
+Send a /show/ URL, wait for the catalogue count, then send:
+
+- `ALL`: every listed episode in one sequential batch, one audio file per episode.
+- `7`: one episode by its actual number.
+- `1-15` or `1 15`: an inclusive range.
+- `*`: same as `ALL`.
+- `*10`: episodes 1 through 10, inclusive.
+- `25*`: episode 25 through the last episode in the loaded catalogue, inclusive.
+- `10*20`: episodes 10 through 20, inclusive.
+- `/cancel`: stop after the current episode finishes.
+
+Star patterns work for both PocketFM and Kuku FM. They use actual episode
+numbers, not positions in the list. Missing numbers, reversed ranges and invalid
+patterns are rejected; they never fall back to downloading everything. An open
+end includes only the loaded catalogue, so check any partial-catalogue warning.
+
+The parser reads the public webpage's embedded episode data and follows the
+website's read-only Load more action. It reports the number listed versus the
+show total and warns if pagination fails. ALL never silently means only the
+first 20 or 500 episodes. A failed episode does not stop the remaining batch;
+the final message reports successful, failed and unattempted counts.
+
+Catalogue visibility does not guarantee media access. Locked episodes and
+unavailable/protected media fail individually. Episode extraction selects only
+the requested story, preventing accidental downloads of recommended episodes.
+OneLink store/app redirects are handled without attempting a non-HTTP request;
+a share link that contains no episode destination still needs an episode URL.
+
+Selection expires after one hour. A restart interrupts active downloads, but
+series batch progress is saved in SQLite. Use /resume after restarting.
+Large batches can take many hours.
+
+### Account checks, Available, Resume and Retry
+
+- `/accountcheck <show URL>` checks one catalogue page using configured credentials.
+  With an already selected show, `/accountcheck` uses that show. A valid API
+  response is reported separately from verified identity or paid playback. A
+  cookie-only PocketFM website response cannot establish paid access. 401/403
+  is reported as session/access denied, not definitive session expiry.
+- `AVAILABLE` or `/available` selects only explicitly available catalogue entries;
+  locked and unknown entries are excluded. Metadata can change; API downloads
+  refresh each episode before attempting it. Available is not a playback guarantee.
+- `/resume` runs pending/interrupted episodes from the latest saved series batch
+  in this user/chat. `/retry` runs only failed episodes. Successful episodes are
+  not repeated within that saved batch. This is not cross-batch deduplication.
+- `/failures` reports episode numbers and failure categories (locked,
+  session/access denied, decode error, timeout, upload or download/processing).
+- Series reply buttons provide Episodes, Available, Resume, Retry, Cancel,
+  Account check and Failures. `/episodes N` still provides pagination.
+
+`BATCH_STATE_PATH` defaults to `/app/state/batches.sqlite3` in Docker. On Render,
+set it to a path **inside an existing persistent disk mount** if progress must
+survive instance replacement or redeploys. The default filesystem is ephemeral;
+no disk is provisioned by this change. Use one bot process/instance; multiple
+workers/replicas are not coordinated. State holds only episode identifiers,
+canonical provider URLs, batch title and outcomes, never cookies, tokens or
+signed CDN URLs. New series batches replace the last saved batch in that chat.
+Resume/retry are manual and use current environment credentials. A crash between
+Telegram delivery and saving success can cause that episode to be sent again.
+This is a download batch, not a backup of PocketFM account state or a merged
+single audio file.
+
+Run offline regression tests with `python -m unittest discover -s tests -v`.
+
+
+
+## Episode availability labels
+
+A show URL now displays Public / Locked / Unknown totals and the first page of
+per-episode titles and labels. Use `/episodes 2`, `/episodes 3`, etc. to browse
+20 entries per page. Standard, www and language-prefixed show URLs are accepted.
+
+Labels come from explicit episode access metadata, not from the presence of a
+media URL. Missing or conflicting metadata is Unknown. If the show request uses
+configured Cookie or Authorization headers, the label is Available (session),
+not Public, and the UI says that login has not been verified. Without credentials,
+the catalogue is the public website view and does not reflect app purchases.
+An explicit unlocked flag takes precedence over a nonzero coin price.
+
+This bot does not implement phone/OTP login. Existing domain-scoped environment
+credentials can be used for authorized webpage requests, but PocketFM account
+login, app/web entitlement synchronization, and paid media downloads have not
+been verified. Never post OTPs or session cookies to Telegram, GitHub or a chat.
+
+## Combined PocketFM + Kuku FM bot
+
+The Series button accepts either provider's full show URL. Both use the same
+`ALL`, episode/range, `/episodes N` and `/cancel` flow. Kuku FM episode URLs are
+refreshed from their catalogue page before each download, so expired signed media
+links and changed account access are checked again. Existing Telegram audio cover,
+title, compression and upload handling are reused.
+
+Kuku FM uses `KUKU_COOKIE`, a raw HTTP Cookie header stored only in the service's
+secret environment settings (not a Netscape cookies.txt file). Set
+`ALLOWED_USER_IDS` to the owner's Telegram user ID before using this private
+session. No cookie is needed to attempt publicly returned catalogue metadata.
+A PocketFM purchase does not grant Kuku FM access; use your own Kuku FM account.
+`/authstatus` reports configuration presence, not verified account login.
+
+KUKU_COOKIE is attached only to HTTPS requests for kukufm.com / www.kukufm.com.
+It is not forwarded to PocketFM or media CDNs. The adapter supports media URLs
+returned to that session through the existing non-decrypting downloader. It does
+not support DRM decryption, app-only short links, buying/unlocking episodes,
+or media requiring extra CDN authentication. Missing access flags remain Unknown.
+
+`/system` reports ffmpeg/ffprobe availability and free disk space. Before every
+download, the bot checks both binaries, folder writability and the free-space
+reserve set by `MIN_FREE_DISK_MB` (default 256). This reserve is a preflight check,
+not a guarantee that an arbitrarily large episode will fit. Failures are reported
+in Telegram without exiting the bot process.
+
+The Kuku adapter was independently implemented against the API shape described
+in https://github.com/bunnykek/kuku-dl and verified against a public catalogue
+response. Upstream cookies, executables and source files are not bundled.
+Paid account playback and end-to-end Telegram uploads still require testing
+with the owner's privately configured session.
+
+## Direct API selection for both services
+
+Kuku FM uses its `/api/v2.3/channels/{show}/episodes/` endpoint.
+PocketFM show links now try `https://api.pocketfm.com/v2/content_api/show.get_details`
+first. Set `POCKETFM_ACCESS_TOKEN` privately in the service environment to request
+your account's catalogue; the bot sends it as the `access-token` header only to
+that exact HTTPS host and endpoint. `ALLOWED_USER_IDS` is required for account
+access. Do not paste token values into chat, GitHub or the repository.
+
+Without a PocketFM token, API failure falls back to the public website catalogue
+with an explicit guest-source notice. With a token, an API failure is reported
+rather than silently substituting guest results. API-selected episode metadata
+and URLs are refreshed before download, preserving lock checks and episode IDs.
+`/authstatus` reports whether both providers' credentials are configured; this is
+not a validation of login or entitlement. Individual PocketFM episode links still
+use the existing webpage flow; the direct API flow is for show selections.
+
+PocketFM's account API integration has offline fixture coverage but still needs
+validation with a real owner-provided token. The older web.pocketfm.com host
+returned HTTP 502 in this environment. No account credentials were supplied or
+configured during development, and no deployment was performed.
+
+
+## Open a series by its identifier
+
+`/pocketfm <show_id>` and `/kuku <show_slug>` open the same catalogue and batch
+flow as a full show URL. Copy the identifier after `/show/` in the provider's
+URL. These commands identify a series; they do not authenticate a user, purchase
+or unlock episodes. Phone-number/OTP login is not implemented. Already unlocked
+account access still requires the owner's privately configured provider session.
