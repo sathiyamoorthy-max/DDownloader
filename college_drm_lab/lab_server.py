@@ -23,13 +23,19 @@ USERS = {
     "student": {
         "credits": 1,
         "entitlements": set(),
-    }
+    },
+    "attacker": {
+        "credits": 0,
+        "entitlements": set(),
+    },
 }
 
 
 def reset_lab_state() -> None:
     USERS["student"]["credits"] = 1
     USERS["student"]["entitlements"].clear()
+    USERS["attacker"]["credits"] = 0
+    USERS["attacker"]["entitlements"].clear()
 
 
 def _episode_or_404(episode_id: int):
