@@ -106,6 +106,22 @@ without printing any secret values.
 
 ## PocketFM full-catalogue batch
 
+### PocketFM website cookies
+
+Set `POCKETFM_COOKIE` in the service environment to your own single-line HTTP
+Cookie header value (`name=value; another=value`). Do not include the `Cookie:`
+prefix or paste a Netscape/JSON cookie file. `ALLOWED_USER_IDS` must be set.
+The dedicated cookie is sent only to HTTPS `pocketfm.com` and `www.pocketfm.com`,
+never to Kuku, media CDNs or the PocketFM API host. It overrides the generic
+AUTH_COOKIE on those website hosts. `/authstatus` reports presence only.
+
+This supplies a website session, not a substitute for `POCKETFM_ACCESS_TOKEN`
+on the direct API. With no API token, guest API failures fall back to the website
+and mark cookie requests as a configured session, not verified login. With an
+API token configured, API authentication errors are still reported. A cookie
+may expire or be insufficient for paid playback. Paid-account downloads have
+not yet been verified; do not commit cookies or share them in chat.
+
 Send a /show/ URL, wait for the catalogue count, then send:
 
 - `ALL`: every listed episode in one sequential batch, one audio file per episode.

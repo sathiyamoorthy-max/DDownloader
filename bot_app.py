@@ -105,6 +105,7 @@ AUTHORIZATION_HEADER = os.getenv("AUTHORIZATION_HEADER", "").strip()
 AUTH_REFERER = os.getenv("AUTH_REFERER", "").strip()
 KUKU_COOKIE = os.getenv("KUKU_COOKIE", "").strip()
 POCKETFM_ACCESS_TOKEN = os.getenv("POCKETFM_ACCESS_TOKEN", "").strip()
+POCKETFM_COOKIE = os.getenv("POCKETFM_COOKIE", "").strip()
 MIN_FREE_DISK_MB = max(0, int(os.getenv("MIN_FREE_DISK_MB", "256")))
 
 _raw_allowed = os.getenv("ALLOWED_USER_IDS", "").strip()
@@ -240,6 +241,14 @@ def extract_url(text: str):
 
 def auth_headers_for_url(url: str) -> dict:
     host = (urlparse(url).hostname or "").lower()
+    if host in {"pocketfm.com", "www.pocketfm.com"} and POCKETFM_COOKIE:
+        if urlparse(url).scheme != "https":
+            return {}
+        if not ALLOWED_USER_IDS:
+            raise RuntimeError("Set ALLOWED_USER_IDS before using a PocketFM cookie.")
+        if "\r" in POCKETFM_COOKIE or "\n" in POCKETFM_COOKIE:
+            raise RuntimeError("POCKETFM_COOKIE must be a single-line Cookie header, not a cookies file.")
+        return {"Cookie": POCKETFM_COOKIE}
     if host in {"kukufm.com", "www.kukufm.com"} and KUKU_COOKIE:
         return {"Cookie": KUKU_COOKIE} if urlparse(url).scheme == "https" else {}
     if (host == POCKET_API_HOST and urlparse(url).scheme == "https"
@@ -1950,7 +1959,8 @@ def pocket_catalog_with_api(url, progress=None):
             raise
         catalog = pocketfm_public_show_catalog(url, progress)
         catalog["provider"] = "pocketfm"
-        catalog["warning"] = ("Guest API unavailable; showing the public website catalogue. "
+        source = "configured website session" if catalog.get("session_request") else "public website"
+        catalog["warning"] = (f"Guest API unavailable; showing the {source} catalogue. "
                               + catalog.get("warning", ""))
         return catalog
 
@@ -2236,6 +2246,7 @@ def cmd_authstatus(message):
             f"Referer present: {'yes' if AUTH_REFERER else 'no'}\n\n"
             f"Kuku FM cookie configured: {'yes' if KUKU_COOKIE else 'no'}\n"
             f"PocketFM API token configured: {'yes' if POCKETFM_ACCESS_TOKEN else 'no'}\n"
+            f"PocketFM website cookie configured: {'yes' if POCKETFM_COOKIE else 'no'}\n"
             "Configured does not mean login has been verified.\n"
             "Secrets are never shown. DRM/license/key bypass is not supported."
         ),

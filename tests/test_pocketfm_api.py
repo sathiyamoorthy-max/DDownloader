@@ -61,4 +61,32 @@ class PocketAPITests(unittest.TestCase):
         with self.assertRaises(RuntimeError):ns['pocket_catalog_with_api']('https://pocketfm.com/show/test')
         self.assertEqual(fallback.call_count,1)
 
+    def test_website_cookie_is_private_and_scoped(self):
+        ns = functions('auth_headers_for_url', POCKETFM_COOKIE='session=test-only',
+                       ALLOWED_USER_IDS={1}, KUKU_COOKIE='', AUTH_DOMAINS=set(),
+                       POCKET_API_HOST=API_HOST, POCKET_API_PATH=API_PATH,
+                       POCKETFM_ACCESS_TOKEN='')
+        headers = ns['auth_headers_for_url']
+        for host in ('pocketfm.com', 'www.pocketfm.com'):
+            self.assertEqual(headers('https://' + host + '/show/test'),
+                             {'Cookie': 'session=test-only'})
+        for url in ('http://pocketfm.com', 'https://pocketfm.com.evil.test',
+                    'https://kukufm.com', 'https://cdn.example',
+                    'https://' + API_HOST + API_PATH):
+            self.assertEqual(headers(url), {})
+        ns['ALLOWED_USER_IDS'] = set()
+        with self.assertRaises(RuntimeError): headers('https://pocketfm.com')
+        ns['ALLOWED_USER_IDS'] = {1}
+        ns['POCKETFM_COOKIE'] = 'bad\nheader'
+        with self.assertRaises(RuntimeError): headers('https://pocketfm.com')
+
+    def test_cookie_fallback_does_not_claim_public_or_verified_login(self):
+        ns = functions('pocket_catalog_with_api', POCKETFM_ACCESS_TOKEN='',
+                       pocket_api_catalog=Mock(side_effect=RuntimeError('guest denied')),
+                       pocket_api_fetch_json=Mock(), pocketfm_public_show_catalog=Mock(
+                           return_value={'entries': [], 'warning': '', 'session_request': True}))
+        result = ns['pocket_catalog_with_api']('https://pocketfm.com/show/test')
+        self.assertIn('configured website session', result['warning'])
+        self.assertNotIn('public website', result['warning'])
+
 if __name__=='__main__':unittest.main()
