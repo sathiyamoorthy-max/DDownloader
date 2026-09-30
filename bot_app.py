@@ -2110,6 +2110,8 @@ def cmd_start(message):
         "/status - live download/upload progress\n"
         "/cancel - stop a batch after the current episode\n"
         "/episodes 1 - episode list with Public/Locked status\n"
+        "/pocketfm <show_id> - open a PocketFM series by ID\n"
+        "/kuku <show_slug> - open a Kuku FM series by slug\n"
         "/system - binaries and free disk space\n"
         "/whoami - show your Telegram user ID\n"
         "/inspect <url> - inspect manifest/DRM markers\n"
@@ -2326,12 +2328,37 @@ def extract_series_url(text):
     return None
 
 
+def series_command_url(text):
+    parts = (text or "").strip().split()
+    if len(parts) != 2:
+        raise ValueError("Use /pocketfm <show_id> or /kuku <show_slug>. These identify a series, not an account.")
+    command = parts[0].lower().split("@", 1)[0]
+    identifier = parts[1]
+    if command == "/pocketfm" and re.fullmatch(r"[a-fA-F0-9]{24,64}", identifier):
+        return "https://pocketfm.com/show/" + identifier
+    if command == "/kuku" and re.fullmatch(r"[A-Za-z0-9_-]{1,200}", identifier):
+        return "https://kukufm.com/show/" + identifier
+    raise ValueError("Invalid series ID. Copy the part after /show/ in the series URL. Do not enter a mobile number or account token.")
+
+
+@bot.message_handler(commands=["pocketfm", "kuku"])
+def cmd_series_id(message):
+    if not allowed_user(message) or not message.from_user:
+        return
+    try:
+        url = series_command_url(message.text)
+    except ValueError as exc:
+        bot.reply_to(message, str(exc))
+        return
+    handle_pocket_show(message, series_url=url)
+
+
 @bot.message_handler(func=lambda message: bool(extract_series_url(message.text)))
-def handle_pocket_show(message):
+def handle_pocket_show(message, series_url=None):
     if not allowed_user(message) or not message.from_user:
         return
 
-    url = extract_series_url(message.text or "")
+    url = series_url or extract_series_url(message.text or "")
     if not url:
         bot.reply_to(message, "Send a full PocketFM or Kuku FM show URL.")
         return

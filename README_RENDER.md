@@ -206,3 +206,12 @@ PocketFM's account API integration has offline fixture coverage but still needs
 validation with a real owner-provided token. The older web.pocketfm.com host
 returned HTTP 502 in this environment. No account credentials were supplied or
 configured during development, and no deployment was performed.
+
+
+## Open a series by its identifier
+
+`/pocketfm <show_id>` and `/kuku <show_slug>` open the same catalogue and batch
+flow as a full show URL. Copy the identifier after `/show/` in the provider's
+URL. These commands identify a series; they do not authenticate a user, purchase
+or unlock episodes. Phone-number/OTP login is not implemented. Already unlocked
+account access still requires the owner's privately configured provider session.

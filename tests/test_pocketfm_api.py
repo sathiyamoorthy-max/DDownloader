@@ -4,6 +4,16 @@ from pocketfm_api import normalize, get_catalog, refresh_episode, API_HOST, API_
 from test_pocketfm_batch import functions, payload, SHOW
 
 class PocketAPITests(unittest.TestCase):
+    def test_show_id_commands_do_not_treat_phone_as_credentials(self):
+        ns=functions('series_command_url')
+        make_url=ns['series_command_url']
+        sid='a'*40
+        self.assertEqual(make_url('/pocketfm '+sid),'https://pocketfm.com/show/'+sid)
+        self.assertEqual(make_url('/pocketfm@mybot '+sid),'https://pocketfm.com/show/'+sid)
+        self.assertEqual(make_url('/kuku my-show'),'https://kukufm.com/show/my-show')
+        for text in ['/pocketfm 1234567890','/pocketfm','/kuku ../secret','/other '+sid]:
+            with self.assertRaises(ValueError):make_url(text)
+
     def test_nested_results_pagination_and_account_access(self):
         a=payload([1,2], total=3, cursor=2)
         b=payload([3], total=3, cursor=-1)
