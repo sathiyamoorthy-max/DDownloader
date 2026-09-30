@@ -7,10 +7,13 @@ from pathlib import Path
 
 def failure_category(error, stage="download"):
     text = str(error).lower()
-    for category in ('audio_decode_failed', 'session_or_access_denied', 'locked',
+    for category in ('configuration_error', 'audio_decode_failed', 'session_or_access_denied', 'locked',
                      'timeout', 'upload_failed', 'download_or_processing_failed'):
         if '[' + category + ']' in text:
             return category
+    if any(word in text for word in ('allowed_user_ids', 'cookie format', 'cookie header',
+                                     'netscape cookie', 'no unexpired matching cookies')):
+        return 'configuration_error'
     if any(word in text for word in ('could not be decoded', 'audio playback validation')):
         return 'audio_decode_failed'
     if any(word in text for word in ('401', '403', 'refused access', 'unauthorized', 'expired token')):

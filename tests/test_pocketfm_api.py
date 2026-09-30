@@ -78,7 +78,7 @@ class PocketAPITests(unittest.TestCase):
         with self.assertRaises(RuntimeError): headers('https://pocketfm.com')
         ns['ALLOWED_USER_IDS'] = {1}
         ns['POCKETFM_COOKIE'] = 'bad\nheader'
-        with self.assertRaises(RuntimeError): headers('https://pocketfm.com')
+        with self.assertRaises(ValueError): headers('https://pocketfm.com')
 
     def test_cookie_fallback_does_not_claim_public_or_verified_login(self):
         ns = functions('pocket_catalog_with_api', POCKETFM_ACCESS_TOKEN='',

@@ -49,12 +49,12 @@ class KukuTests(unittest.TestCase):
         self.assertEqual(normalize_page(data([1], is_locked=True, is_free=True), 'example', 1)['entries'][0]['access'], 'locked')
 
     def test_cookie_does_not_cross_provider_or_redirect_host(self):
-        ns = functions('auth_headers_for_url', KUKU_COOKIE='kuku-test-only',
+        ns = functions('auth_headers_for_url', KUKU_COOKIE='session=kuku-test-only',
                        AUTH_DOMAINS={'pocketfm.com'}, AUTH_COOKIE='pocket-test-only',
                        AUTHORIZATION_HEADER='', AUTH_REFERER='', POCKET_API_HOST='api.pocketfm.com',
                        POCKET_API_PATH='/v2/content_api/show.get_details', POCKETFM_ACCESS_TOKEN='')
         headers = ns['auth_headers_for_url']
-        self.assertEqual(headers('https://kukufm.com/api/episodes'), {'Cookie':'kuku-test-only'})
+        self.assertEqual(headers('https://kukufm.com/api/episodes'), {'Cookie':'session=kuku-test-only'})
         self.assertEqual(headers('https://pocketfm.com/show/test'), {'Cookie':'pocket-test-only'})
         self.assertEqual(headers('https://cdn.example/audio.m3u8'), {})
         self.assertEqual(headers('http://kukufm.com/api/episodes'), {})

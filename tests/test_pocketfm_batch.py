@@ -16,6 +16,7 @@ from pocketfm_catalog import (
     episode_action_id, episode_metadata, public_episode_candidates,
     episode_access, access_summary, episode_list_page,
 )
+from provider_cookies import cookie_header
 
 SHOW = 'test-show'
 
@@ -41,7 +42,7 @@ def functions(*names, **values):
     nodes = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     for n in nodes:
         n.decorator_list = []
-    ns = dict(POCKETFM_COOKIE='', re=re, json=json, time=time, threading=threading, Path=Path,
+    ns = dict(cookie_header=cookie_header, POCKETFM_COOKIE='', re=re, json=json, time=time, threading=threading, Path=Path,
               urlparse=urlparse, urljoin=urljoin, unquote=unquote, parse_qs=parse_qs)
     ns.update(values)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), 'bot_app_functions', 'exec'), ns)

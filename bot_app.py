@@ -28,6 +28,7 @@ from yt_dlp.utils import DownloadError
 from kuku_catalog import show_slug as kuku_show_slug, get_catalog as kuku_get_catalog, refresh_episode as kuku_refresh_episode
 from runtime_checks import system_status, check_download_environment
 from batch_state import BatchStore, pending_indices, failure_report, failure_category
+from provider_cookies import cookie_header
 from pocketfm_api import api_url as pocket_api_url, normalize as pocket_normalize
 from kuku_catalog import api_url as kuku_api_url, normalize_page as kuku_normalize
 from pocketfm_api import get_catalog as pocket_api_catalog, refresh_episode as pocket_api_refresh, API_HOST as POCKET_API_HOST, API_PATH as POCKET_API_PATH
@@ -251,11 +252,9 @@ def auth_headers_for_url(url: str) -> dict:
             return {}
         if not ALLOWED_USER_IDS:
             raise RuntimeError("Set ALLOWED_USER_IDS before using a PocketFM cookie.")
-        if "\r" in POCKETFM_COOKIE or "\n" in POCKETFM_COOKIE:
-            raise RuntimeError("POCKETFM_COOKIE must be a single-line Cookie header, not a cookies file.")
-        return {"Cookie": POCKETFM_COOKIE}
+        return {"Cookie": cookie_header(POCKETFM_COOKIE, url, 'pocketfm.com')}
     if host in {"kukufm.com", "www.kukufm.com"} and KUKU_COOKIE:
-        return {"Cookie": KUKU_COOKIE} if urlparse(url).scheme == "https" else {}
+        return {"Cookie": cookie_header(KUKU_COOKIE, url, 'kukufm.com')} if urlparse(url).scheme == "https" else {}
     if (host == POCKET_API_HOST and urlparse(url).scheme == "https"
             and urlparse(url).path == POCKET_API_PATH):
         return {"access-token": POCKETFM_ACCESS_TOKEN} if POCKETFM_ACCESS_TOKEN else {}

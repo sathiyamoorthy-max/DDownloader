@@ -116,8 +116,14 @@ still required. Decoder details and media contents are not sent to Telegram.
 ### PocketFM website cookies
 
 Set `POCKETFM_COOKIE` in the service environment to your own single-line HTTP
-Cookie header value (`name=value; another=value`). Do not include the `Cookie:`
-prefix or paste a Netscape/JSON cookie file. `ALLOWED_USER_IDS` must be set.
+Cookie header value (`name=value; another=value`) OR the complete multiline
+Netscape cookie export. An optional `Cookie:` prefix is accepted for a raw header.
+JSON exports are not supported. `ALLOWED_USER_IDS` must be set for account cookies.
+Netscape exports are filtered by provider domain, host-only/subdomain flags,
+path and expiry (zero means session cookie). HttpOnly rows are supported.
+Unrelated browser cookies are discarded. Invalid or entirely expired exports
+produce a configuration error without exposing values. Clear cookie settings
+to try public access; no cookie or allowlist is required for the guest path.
 The dedicated cookie is sent only to HTTPS `pocketfm.com` and `www.pocketfm.com`,
 never to Kuku, media CDNs or the PocketFM API host. It overrides the generic
 AUTH_COOKIE on those website hosts. `/authstatus` reports presence only.
@@ -221,8 +227,8 @@ refreshed from their catalogue page before each download, so expired signed medi
 links and changed account access are checked again. Existing Telegram audio cover,
 title, compression and upload handling are reused.
 
-Kuku FM uses `KUKU_COOKIE`, a raw HTTP Cookie header stored only in the service's
-secret environment settings (not a Netscape cookies.txt file). Set
+Kuku FM uses `KUKU_COOKIE`, a raw HTTP Cookie header or multiline Netscape export
+stored only in the service's secret environment settings. Set
 `ALLOWED_USER_IDS` to the owner's Telegram user ID before using this private
 session. No cookie is needed to attempt publicly returned catalogue metadata.
 A PocketFM purchase does not grant Kuku FM access; use your own Kuku FM account.
