@@ -116,6 +116,26 @@ class CatalogueTests(unittest.TestCase):
         self.assertEqual(select_entries('3', entries)[0]['id'], 'story-3')
         with self.assertRaises(ValueError): select_entries('1-3', entries)
 
+    def test_star_selection_includes_endpoints_and_preserves_access(self):
+        entries = catalog_from_values([payload(range(1, 641))], SHOW)['entries']
+        entries[9]['access'] = 'locked'
+        for pattern, first, last in [('*', 1, 640), ('*10', 1, 10),
+                                      ('25*', 25, 640), ('10*20', 10, 20),
+                                      (' 10 * 20 ', 10, 20), ('640*', 640, 640)]:
+            with self.subTest(pattern=pattern):
+                result = select_entries(pattern, entries)
+                self.assertEqual([e['number'] for e in result], list(range(first, last + 1)))
+        self.assertEqual(select_entries('10*10', entries)[0]['access'], 'locked')
+
+    def test_star_selection_rejects_gaps_and_bad_input(self):
+        entries = catalog_from_values([payload([1, 3, 4])], SHOW)['entries']
+        for pattern in ('**', '1**3', '4*3', '*0', '0*', '5*', '*5', '*3', '1*'):
+            with self.subTest(pattern=pattern), self.assertRaises(ValueError):
+                select_entries(pattern, entries)
+        self.assertEqual([e['number'] for e in select_entries('3*', entries)], [3, 4])
+        self.assertEqual(select_entries('*', []), [])
+        with self.assertRaises(ValueError): select_entries('3*', [])
+
     def test_requested_episode_not_recommendation(self):
         a, b = story(1), story(2)
         a['media_url'] = 'https://cdn.example/one.mp3'
@@ -155,6 +175,17 @@ class CatalogueTests(unittest.TestCase):
         self.assertTrue(cat['warning'])
 
 class BotTests(unittest.TestCase):
+    def test_star_messages_reach_series_selector(self):
+        select = Mock()
+        ns = functions('handle_url', allowed_user=lambda m: True,
+                       rate_limited=lambda u: False, process_pocket_range=select,
+                       URL_RE=re.compile(r"https?://[^\s<>]+", re.I))
+        for pattern in ('*', '*10', '25*', '10*20', '**'):
+            msg = SimpleNamespace(text=pattern, from_user=SimpleNamespace(id=1))
+            ns['handle_url'](msg)
+            select.assert_called_with(msg)
+        self.assertEqual(select.call_count, 5)
+
     def test_show_link_routing_accepts_www_locale_and_surrounding_text(self):
         ns = functions('extract_pocketfm_show_url', 'is_pocketfm_url',
                        URL_RE=re.compile(r"https?://[^\s<>]+", re.I))

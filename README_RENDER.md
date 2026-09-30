@@ -111,7 +111,16 @@ Send a /show/ URL, wait for the catalogue count, then send:
 - `ALL`: every listed episode in one sequential batch, one audio file per episode.
 - `7`: one episode by its actual number.
 - `1-15` or `1 15`: an inclusive range.
+- `*`: same as `ALL`.
+- `*10`: episodes 1 through 10, inclusive.
+- `25*`: episode 25 through the last episode in the loaded catalogue, inclusive.
+- `10*20`: episodes 10 through 20, inclusive.
 - `/cancel`: stop after the current episode finishes.
+
+Star patterns work for both PocketFM and Kuku FM. They use actual episode
+numbers, not positions in the list. Missing numbers, reversed ranges and invalid
+patterns are rejected; they never fall back to downloading everything. An open
+end includes only the loaded catalogue, so check any partial-catalogue warning.
 
 The parser reads the public webpage's embedded episode data and follows the
 website's read-only Load more action. It reports the number listed versus the

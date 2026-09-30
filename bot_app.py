@@ -2296,7 +2296,7 @@ def button_pocket_series(message):
     bot.reply_to(
         message,
         "Send a PocketFM or Kuku FM show link. Then send ALL for one batch, "
-        "an episode number, or a range such as 1-15.",
+        "an episode number, or a range such as 1-15, *10, 25*, or 10*20 (inclusive).",
     )
 
 
@@ -2416,7 +2416,7 @@ def handle_pocket_show(message, series_url=None):
             + "Access labels are page metadata, not a download guarantee.\n"
             + (catalog["warning"] + "\n\n" if catalog["warning"] else "\n")
             + "Send ALL for every listed episode in one batch.\n"
-            "Or send 7, 1-15, or 1 15.\n"
+            "Or send 7, 1-15, *10 (1–10), 25* (25–last listed), or 10*20 (10–20).\n"
             "Each episode is sent as a separate audio file.\n"
             "Locked/unavailable episodes are reported as failed.\n"
             "Use /cancel to stop after the current episode.",
@@ -2873,7 +2873,7 @@ def handle_url(message):
 
     text = (message.text or "").strip()
     if not URL_RE.search(text) and (
-        text.lower() in {"all", "அனைத்தும்"} or re.fullmatch(r"[0-9\s–-]+", text)
+        text.lower() in {"all", "அனைத்தும்"} or re.fullmatch(r"[0-9\s–*\-]+", text)
     ):
         process_pocket_range(message)
         return

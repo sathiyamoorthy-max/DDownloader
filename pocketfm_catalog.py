@@ -181,16 +181,28 @@ def action_catalog(text, show_id):
 
 
 def select_entries(text, entries):
+    """Select inclusive episode numbers, including open-ended star patterns.
+
+    Open ends refer to the loaded catalogue, which may be partial. Never
+    interpret malformed input as ALL or substitute list offsets for numbers.
+    """
     text = text.strip().lower()
-    if text in {"all", "அனைத்தும்"}:
+    if text in {"all", "அனைத்தும்", "*"}:
         return list(entries)
     match = re.fullmatch(r"(\d+)(?:\s*[-–]\s*|\s+)(\d+)", text)
+    star = re.fullmatch(r"(\d*)\s*\*\s*(\d*)", text)
     if text.isdigit():
         start = end = int(text)
     elif match:
         start, end = map(int, match.groups())
+    elif star:
+        if not entries:
+            raise ValueError("The catalogue is empty. Send the show link again.")
+        first, last = star.groups()
+        start = int(first) if first else 1
+        end = int(last) if last else max(e["number"] for e in entries)
     else:
-        raise ValueError("Send ALL, an episode number, or a range such as 1-15.")
+        raise ValueError("Send ALL, *, an episode number, 1-15, *10, 25*, or 10*20.")
     if start < 1 or end < start:
         raise ValueError("Episode range must start at 1 or above and be ascending.")
     selected = [e for e in entries if start <= e["number"] <= end]
