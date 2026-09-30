@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import threading
+import subprocess
 import time
 import unittest
 from pathlib import Path
@@ -175,6 +176,20 @@ class CatalogueTests(unittest.TestCase):
         self.assertTrue(cat['warning'])
 
 class BotTests(unittest.TestCase):
+    def test_audio_validation_rejects_decoder_errors_even_on_zero_exit(self):
+        for code, errors in [(1, b''), (0, b'AAC decoder error')]:
+            runner = Mock(return_value=SimpleNamespace(returncode=code, stderr=errors))
+            ns = functions('validate_audio_decodes', subprocess=SimpleNamespace(
+                run=runner, DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE,
+                TimeoutExpired=subprocess.TimeoutExpired))
+            with self.assertRaises(RuntimeError):
+                ns['validate_audio_decodes'](Path('sample.m4a'))
+        runner.return_value = SimpleNamespace(returncode=0, stderr=b'')
+        ns['validate_audio_decodes'](Path('sample.m4a'))
+        runner.side_effect = subprocess.TimeoutExpired('ffmpeg', 900)
+        with self.assertRaisesRegex(RuntimeError, 'timed out'):
+            ns['validate_audio_decodes'](Path('sample.m4a'))
+
     def test_star_messages_reach_series_selector(self):
         select = Mock()
         ns = functions('handle_url', allowed_user=lambda m: True,

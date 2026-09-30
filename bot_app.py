@@ -978,6 +978,26 @@ def probe_media_streams(path: Path) -> dict:
         }
 
 
+def validate_audio_decodes(path: Path) -> None:
+    """A readable container and successful stream copy do not prove playback."""
+    try:
+        completed = subprocess.run(
+            ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-xerror",
+             "-err_detect", "explode", "-i", str(path), "-map", "0:a:0",
+             "-vn", "-f", "null", "-"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=900,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Audio playback validation timed out. File was not uploaded.") from exc
+    if completed.returncode != 0 or completed.stderr.strip():
+        raise RuntimeError(
+            "Downloaded audio could not be decoded and was not uploaded. "
+            "The source may be damaged or protected. Check playback in your "
+            "signed-in provider account and retry with a fresh session. "
+            "Renaming or copying the file cannot repair its audio data."
+        )
+
+
 def prepare_audio_container(
     path: Path,
     job_dir: Path,
@@ -2633,6 +2653,8 @@ def process_one_url(
                     performer=performer,
                 )
             ]
+            for audio_path in upload_files:
+                validate_audio_decodes(audio_path)
 
         if any(
             part.stat().st_size > MAX_UPLOAD_BYTES

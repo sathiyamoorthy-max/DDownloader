@@ -106,6 +106,13 @@ without printing any secret values.
 
 ## PocketFM full-catalogue batch
 
+Before uploading audio, the bot decodes the entire final audio stream with
+FFmpeg (15-minute validation timeout). It rejects decoder errors even when
+FFmpeg returns exit code zero. This prevents sending an unplayable file that
+has readable duration/codec metadata and passes stream-copy remuxing. Validation
+does not repair damaged or protected source audio; a valid playable source is
+still required. Decoder details and media contents are not sent to Telegram.
+
 ### PocketFM website cookies
 
 Set `POCKETFM_COOKIE` in the service environment to your own single-line HTTP
