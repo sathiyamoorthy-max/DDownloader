@@ -26,6 +26,7 @@ COPY pocketfm_catalog.py /app/pocketfm_catalog.py
 COPY kuku_catalog.py /app/kuku_catalog.py
 COPY pocketfm_api.py /app/pocketfm_api.py
 COPY runtime_checks.py /app/runtime_checks.py
+COPY batch_state.py /app/batch_state.py
 COPY register_webhook.py /app/register_webhook.py
 COPY start.sh /app/start.sh
 
@@ -37,4 +38,3 @@ RUN chmod +x /app/start.sh \
 EXPOSE 10000
 
 ENTRYPOINT ["/app/start.sh"]
-

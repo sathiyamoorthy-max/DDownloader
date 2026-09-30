@@ -187,6 +187,8 @@ def select_entries(text, entries):
     interpret malformed input as ALL or substitute list offsets for numbers.
     """
     text = text.strip().lower()
+    if text == 'available':
+        return [entry for entry in entries if entry.get('access') == 'available']
     if text in {"all", "அனைத்தும்", "*"}:
         return list(entries)
     match = re.fullmatch(r"(\d+)(?:\s*[-–]\s*|\s+)(\d+)", text)

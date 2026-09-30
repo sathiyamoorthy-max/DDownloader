@@ -1,4 +1,5 @@
 import hashlib
+import copy
 import ipaddress
 import json
 import logging
@@ -26,6 +27,9 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 from kuku_catalog import show_slug as kuku_show_slug, get_catalog as kuku_get_catalog, refresh_episode as kuku_refresh_episode
 from runtime_checks import system_status, check_download_environment
+from batch_state import BatchStore, pending_indices, failure_report, failure_category
+from pocketfm_api import api_url as pocket_api_url, normalize as pocket_normalize
+from kuku_catalog import api_url as kuku_api_url, normalize_page as kuku_normalize
 from pocketfm_api import get_catalog as pocket_api_catalog, refresh_episode as pocket_api_refresh, API_HOST as POCKET_API_HOST, API_PATH as POCKET_API_PATH
 from pocketfm_catalog import (
     PageParser, page_values, catalog_from_values, episode_action_id,
@@ -123,6 +127,7 @@ if not BOT_TOKEN:
 BASE_DIR = Path(__file__).resolve().parent
 DOWNLOAD_ROOT = BASE_DIR / "downloads"
 DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+BATCH_STORE = BatchStore(os.getenv('BATCH_STATE_PATH', str(BASE_DIR / 'state' / 'batches.sqlite3')))
 
 WEBHOOK_SECRET = hashlib.sha256(
     ("ddownloader-render:" + BOT_TOKEN).encode("utf-8")
@@ -2429,6 +2434,7 @@ def handle_pocket_show(message, series_url=None):
         with _pocket_states_guard:
             _pocket_states[message.from_user.id] = {
                 "title": title,
+                "show_url": url,
                 "provider": provider,
                 "entries": entries,
                 "session_request": catalog.get("session_request", False),
@@ -2454,7 +2460,7 @@ def handle_pocket_show(message, series_url=None):
         )
         bot.reply_to(message, episode_list_page(
             entries, session=catalog.get("session_request", False)
-        ))
+        ), reply_markup=series_controls())
     except Exception as exc:
         edit_status(
             message.chat.id,
@@ -2485,6 +2491,99 @@ def cmd_episodes(message):
     bot.reply_to(message, text)
 
 
+def series_controls():
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row(KeyboardButton('📋 Episodes'), KeyboardButton('⬇️ Available'))
+    markup.row(KeyboardButton('▶️ Resume'), KeyboardButton('🔄 Retry'), KeyboardButton('⛔ Cancel'))
+    markup.row(KeyboardButton('🔐 Account check'), KeyboardButton('📄 Failures'))
+    markup.row(KeyboardButton('🔍 Series'), KeyboardButton('📊 Status'))
+    return markup
+
+
+@bot.message_handler(commands=['available'])
+def cmd_available(message):
+    selection = copy.copy(message)
+    selection.text = 'AVAILABLE'
+    process_pocket_range(selection)
+
+
+@bot.message_handler(commands=['resume', 'retry'])
+def cmd_continue_batch(message):
+    if not allowed_user(message) or not message.from_user:
+        return
+    mode = message.text.split()[0].split('@')[0].lstrip('/')
+    process_url_batch(message, [], saved_mode=mode)
+
+
+@bot.message_handler(commands=['failures'])
+def cmd_failures(message):
+    if not allowed_user(message) or not message.from_user:
+        return
+    batch = BATCH_STORE.load(message.from_user.id, message.chat.id)
+    bot.reply_to(message, failure_report(batch) if batch else 'No saved batch in this chat.')
+
+
+@bot.message_handler(commands=['accountcheck'])
+def cmd_accountcheck(message):
+    if not allowed_user(message) or not message.from_user:
+        return
+    with _pocket_states_guard:
+        state = dict(_pocket_states.get(message.from_user.id, {}))
+    url = extract_series_url(message.text or '')
+    if not url and state.get('chat_id') == message.chat.id:
+        url = state.get('show_url')
+    if not url:
+        bot.reply_to(message, 'Use /accountcheck followed by a PocketFM or Kuku FM show URL, or load a series first.')
+        return
+    try:
+        slug = kuku_show_slug(url)
+        if slug:
+            if not auth_headers_for_url(url).get('Cookie'):
+                bot.reply_to(message, 'Kuku FM: no cookie configured. Set KUKU_COOKIE privately in Render.')
+                return
+            page = kuku_normalize(kuku_fetch_json(kuku_api_url(slug, 1)), slug, 1)
+            label = 'Kuku FM API'
+        elif POCKETFM_ACCESS_TOKEN:
+            show_id = re.search(r'/show/([A-Za-z0-9_-]+)', urlparse(url).path).group(1)
+            page = pocket_normalize(pocket_api_fetch_json(pocket_api_url(show_id, 0)), show_id, 0)
+            label = 'PocketFM API'
+        elif auth_headers_for_url(url).get('Cookie'):
+            response = scoped_get(url, timeout=30)
+            try:
+                response.raise_for_status()
+                bot.reply_to(message, 'PocketFM website responded to the cookie request. Login and paid access are NOT verified. Set POCKETFM_ACCESS_TOKEN for an API check.')
+            finally:
+                response.close()
+            return
+        else:
+            bot.reply_to(message, 'PocketFM: no token/cookie configured. Set POCKETFM_ACCESS_TOKEN or POCKETFM_COOKIE privately in Render.')
+            return
+        bot.reply_to(message, label + ': request with credentials returned a valid catalogue page.\n'
+                     + access_summary(page['entries'], session=True)
+                     + '\nFirst page only. This is not proof of account identity, paid entitlement or playable audio. Try one purchased episode to verify playback.')
+    except Exception as exc:
+        bot.reply_to(message, 'Account check failed: ' + failure_category(exc)
+                     + '\nA 401/403 may mean expired credentials or denied access; it does not prove expiry. Check your session privately in Render.')
+
+
+@bot.message_handler(func=lambda m: m.text in {
+    '📋 Episodes', '⬇️ Available', '▶️ Resume', '🔄 Retry', '⛔ Cancel',
+    '🔐 Account check', '📄 Failures'})
+def button_series_action(message):
+    if not allowed_user(message) or not message.from_user:
+        return
+    actions = {
+        '📋 Episodes': ('/episodes', cmd_episodes), '⬇️ Available': ('/available', cmd_available),
+        '▶️ Resume': ('/resume', cmd_continue_batch), '🔄 Retry': ('/retry', cmd_continue_batch),
+        '⛔ Cancel': ('/cancel', cmd_cancel), '🔐 Account check': ('/accountcheck', cmd_accountcheck),
+        '📄 Failures': ('/failures', cmd_failures),
+    }
+    text, action = actions[message.text]
+    command = copy.copy(message)
+    command.text = text
+    action(command)
+
+
 def process_pocket_range(message):
     if not allowed_user(message) or not message.from_user:
         return
@@ -2501,12 +2600,16 @@ def process_pocket_range(message):
     except ValueError as exc:
         bot.reply_to(message, str(exc))
         return
+    if not selected:
+        bot.reply_to(message, "No episodes are explicitly Available in this catalogue. Reload the show after updating your session.")
+        return
     process_url_batch(
         message, [e["url"] for e in selected],
         batch_label="Kuku FM batch" if state.get("provider") == "kuku" else "PocketFM batch",
         performer_override=state.get("title"),
         episode_numbers=[e["number"] for e in selected],
-        media_entries=selected if state.get("provider") in {"kuku", "pocketfm_api"} else None,
+        media_entries=selected,
+        journal_entries=selected,
     )
 
 
@@ -2782,7 +2885,9 @@ def process_one_url(
             "Download failed for user %s",
             user_id,
         )
-        error_text = safe_error(exc)
+        stage = (get_job(user_id) or {}).get('state', '')
+        category = failure_category(exc, stage)
+        error_text = '[' + category + '] ' + safe_error(exc)
         set_job(user_id, "failed", error_text)
         edit_status(
             message.chat.id,
@@ -2802,6 +2907,8 @@ def process_url_batch(
     performer_override: str | None = None,
     episode_numbers: list[int] | None = None,
     media_entries: list[dict] | None = None,
+    journal_entries: list[dict] | None = None,
+    saved_mode: str | None = None,
 ):
     if not message.from_user:
         return
@@ -2820,6 +2927,25 @@ def process_url_batch(
     with _pocket_states_guard:
         _batch_cancel_events[user_id] = cancel_event
     try:
+        saved = None
+        indices = []
+        if saved_mode:
+            saved = BATCH_STORE.load(user_id, message.chat.id)
+            if not saved:
+                bot.reply_to(message, "No saved series batch in this chat. Send a show link first.")
+                return
+            indices = pending_indices(saved, retry=saved_mode == 'retry')
+            if not indices:
+                bot.reply_to(message, "No failed episodes to retry." if saved_mode == 'retry' else "No pending episodes. Use /retry for failures.")
+                return
+            media_entries = [saved['items'][i]['entry'] for i in indices]
+            urls = [e['url'] for e in media_entries]
+            episode_numbers = [e['number'] for e in media_entries]
+            performer_override = saved['title']
+            batch_label = saved_mode.capitalize()
+        elif journal_entries:
+            saved = BATCH_STORE.create(user_id, message.chat.id, journal_entries, performer_override)
+            indices = list(range(len(journal_entries)))
         total = len(urls)
         success = 0
         failed = []
@@ -2828,6 +2954,9 @@ def process_url_batch(
             if cancel_event.is_set():
                 break
             attempted += 1
+            if saved:
+                saved['items'][indices[index - 1]]['status'] = 'running'
+                BATCH_STORE.save(user_id, message.chat.id, saved)
             sequence = (
                 f"{batch_label} ({index}/{total})"
                 if batch_label
@@ -2847,8 +2976,16 @@ def process_url_batch(
                 media_entry=media_entries[index - 1] if media_entries else None,
             ):
                 success += 1
+                outcome = 'done'
             else:
                 failed.append(episode_numbers[index - 1] if episode_numbers else index)
+                outcome = 'failed'
+            if saved:
+                item = saved['items'][indices[index - 1]]
+                item['status'] = outcome
+                detail = str(get_job(user_id) or '')
+                item['reason'] = failure_category(detail) if outcome == 'failed' else ''
+                BATCH_STORE.save(user_id, message.chat.id, saved)
 
         if total > 1:
             bot.reply_to(
@@ -2860,6 +2997,9 @@ def process_url_batch(
                 + ("\nFailed episode numbers: " + ", ".join(map(str, failed[:100]))
                    + (" …" if len(failed) > 100 else "") if failed else ""),
             )
+        if saved:
+            bot.reply_to(message, failure_report(saved) + "\n/resume: unattempted/interrupted episodes\n/retry: failed episodes",
+                         reply_markup=series_controls())
     finally:
         with _pocket_states_guard:
             _batch_cancel_events.pop(user_id, None)
@@ -2906,7 +3046,7 @@ def handle_url(message):
 
     text = (message.text or "").strip()
     if not URL_RE.search(text) and (
-        text.lower() in {"all", "அனைத்தும்"} or re.fullmatch(r"[0-9\s–*\-]+", text)
+        text.lower() in {"all", "available", "அனைத்தும்"} or re.fullmatch(r"[0-9\s–*\-]+", text)
     ):
         process_pocket_range(message)
         return

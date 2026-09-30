@@ -157,8 +157,37 @@ the requested story, preventing accidental downloads of recommended episodes.
 OneLink store/app redirects are handled without attempting a non-HTTP request;
 a share link that contains no episode destination still needs an episode URL.
 
-Selection expires after one hour. Selection and active batches are in memory:
-a Render restart/deploy interrupts them. Large batches can take many hours.
+Selection expires after one hour. A restart interrupts active downloads, but
+series batch progress is saved in SQLite. Use /resume after restarting.
+Large batches can take many hours.
+
+### Account checks, Available, Resume and Retry
+
+- `/accountcheck <show URL>` checks one catalogue page using configured credentials.
+  With an already selected show, `/accountcheck` uses that show. A valid API
+  response is reported separately from verified identity or paid playback. A
+  cookie-only PocketFM website response cannot establish paid access. 401/403
+  is reported as session/access denied, not definitive session expiry.
+- `AVAILABLE` or `/available` selects only explicitly available catalogue entries;
+  locked and unknown entries are excluded. Metadata can change; API downloads
+  refresh each episode before attempting it. Available is not a playback guarantee.
+- `/resume` runs pending/interrupted episodes from the latest saved series batch
+  in this user/chat. `/retry` runs only failed episodes. Successful episodes are
+  not repeated within that saved batch. This is not cross-batch deduplication.
+- `/failures` reports episode numbers and failure categories (locked,
+  session/access denied, decode error, timeout, upload or download/processing).
+- Series reply buttons provide Episodes, Available, Resume, Retry, Cancel,
+  Account check and Failures. `/episodes N` still provides pagination.
+
+`BATCH_STATE_PATH` defaults to `/app/state/batches.sqlite3` in Docker. On Render,
+set it to a path **inside an existing persistent disk mount** if progress must
+survive instance replacement or redeploys. The default filesystem is ephemeral;
+no disk is provisioned by this change. Use one bot process/instance; multiple
+workers/replicas are not coordinated. State holds only episode identifiers,
+canonical provider URLs, batch title and outcomes, never cookies, tokens or
+signed CDN URLs. New series batches replace the last saved batch in that chat.
+Resume/retry are manual and use current environment credentials. A crash between
+Telegram delivery and saving success can cause that episode to be sent again.
 This is a download batch, not a backup of PocketFM account state or a merged
 single audio file.
 
