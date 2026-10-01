@@ -128,6 +128,35 @@ def process(source, output, mode, keys_file=None, allow_network=False):
     return output
 
 
+def export_telegram_format(source, output_dir, fmt, cover=None):
+    """Export playable local audio as MP3 or a cover-video MP4."""
+    if fmt not in {'mp3', 'mp4'}:
+        raise ValueError('Choose mp3 or mp4.')
+    output = Path(output_dir) / ('telegram-export.' + fmt)
+    args = ['ffmpeg', '-nostdin', '-v', 'error', '-y', '-i', str(source)]
+    if fmt == 'mp3':
+        args += ['-map', '0:a:0', '-vn', '-c:a', 'libmp3lame', '-b:a', '128k']
+    else:
+        if cover:
+            args += ['-loop', '1', '-framerate', '1', '-i', str(cover)]
+        else:
+            args += ['-f', 'lavfi', '-i', 'color=c=0x182536:s=640x360:r=1']
+        args += ['-map', '1:v:0', '-map', '0:a:0',
+                 '-vf', 'scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,setsar=1',
+                 '-c:v', 'libx264', '-threads', '1', '-tune', 'stillimage',
+                 '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k',
+                 '-shortest', '-movflags', '+faststart']
+    try:
+        run_checked(args + [str(output)], 'Format conversion', timeout=7200, reject_errors=True)
+        run_checked(['ffmpeg', '-nostdin', '-v', 'error', '-xerror',
+                     '-i', str(output), '-map', '0:a:0', '-map', '0:v:0?',
+                     '-f', 'null', '-'], 'Export decode validation', timeout=7200, reject_errors=True)
+    except Exception:
+        output.unlink(missing_ok=True)
+        raise
+    return output
+
+
 def demo(folder):
     """Generate our own encrypted tone, decrypt and validate it; no account needed."""
     folder = Path(folder).resolve()

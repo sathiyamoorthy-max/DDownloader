@@ -54,3 +54,25 @@ class EncryptionTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+class TelegramFormatTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'requires FFmpeg')
+    def test_mp3_and_mp4_real_audio(self):
+        from encrypted_media import export_telegram_format
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp)/'tone.wav'
+            subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=duration=2',str(source)],check=True)
+            for fmt in ('mp3', 'mp4'):
+                output = export_telegram_format(source, tmp, fmt)
+                info = json.loads(subprocess.check_output(['ffprobe','-v','error','-show_streams','-of','json',str(output)]))
+                codecs = {s['codec_name'] for s in info['streams']}
+                self.assertIn('mp3' if fmt == 'mp3' else 'aac', codecs)
+                self.assertEqual('h264' in codecs, fmt == 'mp4')
+            cover = Path(tmp)/'cover.ppm'
+            cover.write_bytes(b'P6\n2 2\n255\n' + bytes([200, 80, 40])*4)
+            export_telegram_format(source, tmp, 'mp4', cover)
+            bad = Path(tmp)/'bad.wav'
+            bad.write_bytes(b'not audio')
+            with self.assertRaises(RuntimeError):
+                export_telegram_format(bad, tmp, 'mp3')
+            self.assertFalse((Path(tmp)/'telegram-export.mp3').exists())

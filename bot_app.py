@@ -29,7 +29,7 @@ from kuku_catalog import show_slug as kuku_show_slug, get_catalog as kuku_get_ca
 from runtime_checks import system_status, check_download_environment
 from batch_state import BatchStore, pending_indices, failure_report, failure_category
 from provider_cookies import cookie_header
-from encrypted_media import encryption_markers
+from encrypted_media import encryption_markers, export_telegram_format
 from pocketfm_api import api_url as pocket_api_url, normalize as pocket_normalize
 from kuku_catalog import api_url as kuku_api_url, normalize_page as kuku_normalize
 from pocketfm_api import get_catalog as pocket_api_catalog, refresh_episode as pocket_api_refresh, API_HOST as POCKET_API_HOST, API_PATH as POCKET_API_PATH
@@ -190,6 +190,9 @@ URL_RE = re.compile(r"https?://[^\s<>]+", re.IGNORECASE)
 # Utility helpers
 # ============================================================
 
+_output_formats = {}
+
+
 def get_main_menu():
     markup = ReplyKeyboardMarkup(
         resize_keyboard=True,
@@ -203,6 +206,7 @@ def get_main_menu():
         KeyboardButton("📊 Status"),
         KeyboardButton("ℹ️ Help"),
     )
+    markup.row(KeyboardButton("🎵 MP3"), KeyboardButton("🎬 MP4"))
     return markup
 
 
@@ -2090,6 +2094,20 @@ def cleanup_job(job_dir: Path):
 # Telegram commands
 # ============================================================
 
+@bot.message_handler(commands=['mp3', 'mp4'])
+@bot.message_handler(func=lambda m: m.text in {'🎵 MP3', '🎬 MP4'})
+def cmd_output_format(message):
+    if not allowed_user(message) or not message.from_user:
+        return
+    fmt = 'mp4' if 'mp4' in (message.text or '').lower() else 'mp3'
+    with _pocket_states_guard:
+        _output_formats[(message.from_user.id, message.chat.id)] = fmt
+    bot.reply_to(message, 'Output: ' + fmt.upper() +
+                 (' — audio with cover video.' if fmt == 'mp4' else ' — audio file.') +
+                 '\nNow send an episode/show link or select episodes. Choice resets on restart.',
+                 reply_markup=get_main_menu())
+
+
 @bot.message_handler(commands=["start", "help"])
 def cmd_start(message):
     if not allowed_user(message):
@@ -2102,6 +2120,7 @@ def cmd_start(message):
         "checked against the requested episode metadata. Send a show link "
         "and then ALL to download every listed episode in one batch.\n\n"
         "Commands:\n"
+        "/mp3 or /mp4 - choose audio or cover-video output\n"
         "/status - live download/upload progress\n"
         "/cancel - stop a batch after the current episode\n"
         "/episodes 1 - episode list with Public/Locked status\n"
@@ -2457,6 +2476,7 @@ def series_controls():
     markup.row(KeyboardButton('▶️ Resume'), KeyboardButton('🔄 Retry'), KeyboardButton('⛔ Cancel'))
     markup.row(KeyboardButton('🔐 Account check'), KeyboardButton('📄 Failures'))
     markup.row(KeyboardButton('🔍 Series'), KeyboardButton('📊 Status'))
+    markup.row(KeyboardButton("🎵 MP3"), KeyboardButton("🎬 MP4"))
     return markup
 
 
@@ -2594,6 +2614,8 @@ def process_one_url(
     performer_override: str | None = None,
     media_entry: dict | None = None,
 ) -> bool:
+    with _pocket_states_guard:
+        output_format = _output_formats.get((user_id, message.chat.id))
     job_id = f"{user_id}_{message.message_id}_{uuid.uuid4().hex[:8]}"
     job_dir = DOWNLOAD_ROOT / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -2695,7 +2717,11 @@ def process_one_url(
             job_dir,
         )
 
-        if media_kind == "audio":
+        if output_format and probe.get("has_audio"):
+            result = export_telegram_format(result, job_dir, output_format, thumbnail_path)
+            media_kind = "video" if output_format == "mp4" else "audio"
+
+        if media_kind == "audio" and output_format != "mp3":
             result = prepare_audio_container(
                 result,
                 job_dir,

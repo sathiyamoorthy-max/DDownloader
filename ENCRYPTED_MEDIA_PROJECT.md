@@ -76,3 +76,21 @@ synthetic demo success is not a provider compatibility test.
 
 This is independently written code. No upstream source, CDM, account cookies,
 content keys, binaries or protected media have been copied into the repository.
+
+## Telegram MP3 / MP4 options
+
+Use `/start`, then **🎵 MP3** or **🎬 MP4** (also `/mp3` and `/mp4`).
+Send an episode/show link and choose episodes as before. MP3 encodes audio
+at 128 kbps; MP4 encodes AAC audio with an H.264 cover image video at 640x360.
+Without a cover, MP4 shows a plain dark background. This is not an original
+PocketFM video and does not improve the source audio quality.
+
+The choice is scoped to your Telegram user and chat, applies to subsequent
+episodes, and resets after a restart/deploy. No choice retains previous behavior.
+Conversion uses already downloaded playable audio; it cannot unlock an episode
+or repair encrypted/invalid audio. Both formats pass full decode validation.
+Telegram upload limits still apply; oversized MP4 files report a size error.
+
+Validation: 48 tests passed, including real generated audio converted into MP3
+and MP4 with/without a cover. Actual PocketFM episode playback has not been
+verified with these options; this is not a 100% provider-success claim.
