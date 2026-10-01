@@ -29,6 +29,7 @@ from kuku_catalog import show_slug as kuku_show_slug, get_catalog as kuku_get_ca
 from runtime_checks import system_status, check_download_environment
 from batch_state import BatchStore, pending_indices, failure_report, failure_category
 from provider_cookies import cookie_header
+from encrypted_media import encryption_markers
 from pocketfm_api import api_url as pocket_api_url, normalize as pocket_normalize
 from kuku_catalog import api_url as kuku_api_url, normalize_page as kuku_normalize
 from pocketfm_api import get_catalog as pocket_api_catalog, refresh_episode as pocket_api_refresh, API_HOST as POCKET_API_HOST, API_PATH as POCKET_API_PATH
@@ -424,47 +425,7 @@ def fetch_for_inspection(url: str):
 
 
 def detect_drm_markers(text: str) -> list[str]:
-    lower = (text or "").lower()
-    found = []
-
-    if (
-        "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" in lower
-        or "widevine" in lower
-        or "com.widevine.alpha" in lower
-    ):
-        found.append("Widevine")
-
-    if (
-        "9a04f079-9840-4286-ab92-e65be0885f95" in lower
-        or "playready" in lower
-        or "mspr:pro" in lower
-    ):
-        found.append("PlayReady")
-
-    if (
-        "com.apple.fps" in lower
-        or "skd://" in lower
-        or "fairplay" in lower
-    ):
-        found.append("FairPlay")
-
-    if (
-        "sample-aes" in lower
-        or "sample-aes-ctr" in lower
-    ):
-        found.append("SAMPLE-AES")
-
-    if (
-        "#ext-x-key" in lower
-        and "method=none" not in lower
-        and not any(
-            item in found
-            for item in ["FairPlay", "SAMPLE-AES"]
-        )
-    ):
-        found.append("HLS encryption")
-
-    return found
+    return encryption_markers(text)
 
 
 def manifest_type_from_text(url: str, content_type: str, text: str) -> str:
