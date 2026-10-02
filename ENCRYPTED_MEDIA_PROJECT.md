@@ -94,3 +94,27 @@ Telegram upload limits still apply; oversized MP4 files report a size error.
 Validation: 48 tests passed, including real generated audio converted into MP3
 and MP4 with/without a cover. Actual PocketFM episode playback has not been
 verified with these options; this is not a 100% provider-success claim.
+
+## Story Studio Telegram Mini App
+
+Send `/app` in a private bot chat (or choose **📱 Mini App** from `/start`).
+The keyboard launches `/miniapp` on `MINIAPP_BASE_URL`, falling back to Render's
+`RENDER_EXTERNAL_URL`. Set the former to your service HTTPS origin if needed.
+The Docker image includes the UI and validated WebApp message bridge.
+
+The Mini App uses Telegram keyboard `sendData` to submit one selected action,
+then Telegram closes it. Results, episode lists and progress appear in bot chat;
+this version is a command dashboard, not an in-app streaming player or live
+status dashboard. Commands include load show, download URL, select range,
+available/all listed, list episodes, progress, resume/retry/cancel, failure
+report, account configuration/check, and system check.
+
+User and chat identity come from the Telegram webhook message, not page input.
+Existing user allowlists, URL validation, account rules and batch locks apply.
+Payloads are bounded and allowlisted; credentials are not accepted by the UI.
+Direct browser visits are preview-only. Use the bot keyboard launch for actions.
+
+PocketFM.com opens separately for website login. Its session is not transferred
+to this bot. Phone/OTP, per-user token login, bonus claims and paid unlocks are
+explicitly marked unconnected; no API endpoints or entitlements are fabricated.
+Account checks use the existing operator-configured Render credentials.

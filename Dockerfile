@@ -29,6 +29,8 @@ COPY runtime_checks.py /app/runtime_checks.py
 COPY batch_state.py /app/batch_state.py
 COPY provider_cookies.py /app/provider_cookies.py
 COPY encrypted_media.py /app/encrypted_media.py
+COPY miniapp_bridge.py /app/miniapp_bridge.py
+COPY web /app/web
 COPY register_webhook.py /app/register_webhook.py
 COPY start.sh /app/start.sh
 

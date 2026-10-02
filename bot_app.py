@@ -17,11 +17,11 @@ from pathlib import Path
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 import requests
 import telebot
 from telebot import apihelper
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
@@ -30,6 +30,7 @@ from runtime_checks import system_status, check_download_environment
 from batch_state import BatchStore, pending_indices, failure_report, failure_category
 from provider_cookies import cookie_header
 from encrypted_media import encryption_markers, export_telegram_format
+from miniapp_bridge import parse_action
 from pocketfm_api import api_url as pocket_api_url, normalize as pocket_normalize
 from kuku_catalog import api_url as kuku_api_url, normalize_page as kuku_normalize
 from pocketfm_api import get_catalog as pocket_api_catalog, refresh_episode as pocket_api_refresh, API_HOST as POCKET_API_HOST, API_PATH as POCKET_API_PATH
@@ -207,6 +208,7 @@ def get_main_menu():
         KeyboardButton("ℹ️ Help"),
     )
     markup.row(KeyboardButton("🎵 MP3"), KeyboardButton("🎬 MP4"))
+    markup.row(KeyboardButton("📱 Mini App"))
     return markup
 
 
@@ -2108,6 +2110,64 @@ def cmd_output_format(message):
                  reply_markup=get_main_menu())
 
 
+def miniapp_url():
+    base = os.getenv('MINIAPP_BASE_URL', os.getenv('RENDER_EXTERNAL_URL', '')).strip().rstrip('/')
+    parsed = urlparse(base)
+    if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
+        return None
+    return base + '/miniapp'
+
+
+@bot.message_handler(commands=['app'])
+@bot.message_handler(func=lambda m: m.text == '📱 Mini App')
+def cmd_miniapp(message):
+    if not allowed_user(message):
+        return
+    if message.chat.type != 'private':
+        bot.reply_to(message, 'Open /app in a private chat with this bot.')
+        return
+    url = miniapp_url()
+    if not url:
+        bot.reply_to(message, 'Mini App URL is not configured. Set MINIAPP_BASE_URL to the HTTPS bot service origin in Render.')
+        return
+    markup = ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row(KeyboardButton('Open Mini App', web_app=WebAppInfo(url)))
+    bot.reply_to(message, 'Open Story Studio. Results appear in this chat.', reply_markup=markup)
+
+
+@bot.message_handler(content_types=['web_app_data'])
+def handle_miniapp_data(message):
+    if not allowed_user(message) or not message.from_user or message.chat.type != 'private':
+        return
+    try:
+        action, value, fmt = parse_action(message.web_app_data.data)
+    except ValueError as exc:
+        bot.reply_to(message, str(exc))
+        return
+    command = copy.copy(message)
+    with _pocket_states_guard:
+        if action in {'show', 'download', 'select'}:
+            _output_formats[(message.from_user.id, message.chat.id)] = fmt
+    if action == 'show':
+        command.text = value
+        if not extract_series_url(value):
+            bot.reply_to(message, 'Use a supported PocketFM or Kuku FM show URL.')
+            return
+        handle_pocket_show(command)
+    elif action == 'download':
+        command.text = value
+        handle_url(command)
+    elif action == 'select':
+        command.text = value
+        process_pocket_range(command)
+    else:
+        command.text = '/' + action + (' ' + value if value else '')
+        handlers = {'episodes': cmd_episodes, 'status': cmd_status, 'resume': cmd_continue_batch,
+                    'retry': cmd_continue_batch, 'cancel': cmd_cancel, 'failures': cmd_failures,
+                    'authstatus': cmd_authstatus, 'accountcheck': cmd_accountcheck, 'system': cmd_system}
+        handlers[action](command)
+
+
 @bot.message_handler(commands=["start", "help"])
 def cmd_start(message):
     if not allowed_user(message):
@@ -2120,6 +2180,7 @@ def cmd_start(message):
         "checked against the requested episode metadata. Send a show link "
         "and then ALL to download every listed episode in one batch.\n\n"
         "Commands:\n"
+        "/app - open Story Studio Mini App\n"
         "/mp3 or /mp4 - choose audio or cover-video output\n"
         "/status - live download/upload progress\n"
         "/cancel - stop a batch after the current episode\n"
@@ -2477,6 +2538,7 @@ def series_controls():
     markup.row(KeyboardButton('🔐 Account check'), KeyboardButton('📄 Failures'))
     markup.row(KeyboardButton('🔍 Series'), KeyboardButton('📊 Status'))
     markup.row(KeyboardButton("🎵 MP3"), KeyboardButton("🎬 MP4"))
+    markup.row(KeyboardButton("📱 Mini App"))
     return markup
 
 
@@ -3102,6 +3164,15 @@ def index():
         max_video_height=MAX_VIDEO_HEIGHT,
         progress_update_seconds=PROGRESS_UPDATE_SECONDS,
     )
+
+
+@app.get('/miniapp')
+def miniapp_page():
+    response = send_file(Path(__file__).parent / 'web' / 'miniapp.html')
+    response.headers['Cache-Control'] = 'no-store'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
 
 
 @app.get("/health")
