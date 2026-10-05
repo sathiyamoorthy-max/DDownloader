@@ -39,6 +39,7 @@ from pocketfm_catalog import (
     PageParser, page_values, catalog_from_values, episode_action_id,
     action_catalog, select_entries, episode_metadata, public_episode_candidates,
     episode_access, access_summary, episode_list_page,
+    story_card_text,
 )
 
 
@@ -1695,6 +1696,7 @@ def pocketfm_public_show_catalog(url: str, progress=None) -> dict:
     parser = PageParser()
     parser.feed(html)
     catalog["title"] = catalog["title"] or parser.title or "Pocket FM Series"
+    catalog['thumbnail'] = catalog.get('thumbnail') or parser.image
     catalog["warning"] = ""
     # Sending credentials does not prove login succeeded. Describe the source
     # as a session request, never claim the user is authenticated.
@@ -2497,6 +2499,26 @@ def cmd_story_library(message):
         bot.reply_to(message, 'Saved-story operation failed. Please try again.')
 
 
+def send_story_card(message, catalog, url):
+    caption = story_card_text(catalog, url)
+    thumbnail = catalog.get('thumbnail')
+    if isinstance(thumbnail, str):
+        try:
+            parsed = urlparse(thumbnail)
+            # Only public cover URLs go to Telegram; never forward auth headers.
+            if parsed.scheme == 'https' and not (parsed.query or parsed.fragment or parsed.username or parsed.password):
+                validate_public_http_url(thumbnail)
+                if len(caption) <= 1000:
+                    bot.send_photo(message.chat.id, thumbnail, caption=caption, parse_mode='HTML')
+                else:
+                    bot.send_photo(message.chat.id, thumbnail)
+                    bot.reply_to(message, caption, parse_mode='HTML', disable_web_page_preview=True)
+                return
+        except Exception:
+            logger.info('Story cover unavailable; sending text card.')
+    bot.reply_to(message, caption, parse_mode='HTML', disable_web_page_preview=True)
+
+
 @bot.message_handler(func=lambda message: bool(extract_series_url(message.text)))
 def handle_pocket_show(message, series_url=None):
     if not allowed_user(message) or not message.from_user:
@@ -2530,6 +2552,7 @@ def handle_pocket_show(message, series_url=None):
             provider = catalog.get("provider", "pocketfm")
         entries = catalog["entries"]
         title = catalog["title"]
+        send_story_card(message, catalog, url)
         if not entries:
             edit_status(
                 message.chat.id,

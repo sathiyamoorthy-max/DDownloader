@@ -51,6 +51,7 @@ def get_catalog(url, fetch_json, progress=None, session=False):
             catalog['title'] = page['title'] or catalog['title']
             catalog['total'] = max(catalog['total'], page['total'])
             catalog['thumbnail'] = page['thumbnail'] or catalog['thumbnail']
+            catalog.setdefault('metadata', {}).update(page.get('metadata', {}))
             if progress:
                 progress(len(entries), catalog['total'])
             cursor = page['next_ptr']

@@ -2,7 +2,7 @@
 
 import json
 import re
-from html import unescape
+from html import unescape, escape
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 
@@ -13,6 +13,7 @@ class PageParser(HTMLParser):
         self.scripts = []
         self.sources = []
         self.title = None
+        self.image = None
         self._parts = None
 
     def handle_starttag(self, tag, attrs):
@@ -23,6 +24,8 @@ class PageParser(HTMLParser):
                 self.sources.append(attrs["src"])
         if tag == "meta" and attrs.get("property") == "og:title":
             self.title = attrs.get("content")
+        if tag == "meta" and attrs.get("property") == "og:image":
+            self.image = attrs.get("content")
 
     def handle_data(self, data):
         if self._parts is not None:
@@ -120,17 +123,71 @@ def episode_list_page(entries, page=1, session=False):
     return "\n".join(lines)
 
 
+def show_metadata(record):
+    """Keep only display fields supplied by a matching show record."""
+    aliases = {
+        'language': ('language', 'show_language'),
+        'plays': ('play_count', 'plays', 'total_plays'),
+        'rating': ('rating', 'average_rating'),
+        'reviews': ('rating_count', 'ratings_count', 'review_count'),
+        'author': ('author_name', 'author'),
+        'genre': ('genre', 'genres', 'category_name'),
+        'thumbnail': ('image_url', 'thumbnail_url'),
+    }
+    result = {}
+    for key, names in aliases.items():
+        for name in names:
+            value = record.get(name)
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool) and str(value).strip():
+                result[key] = str(value)
+                break
+            if key == 'genre' and isinstance(value, list):
+                labels = [v for v in value if isinstance(v, str)]
+                if labels:
+                    result[key] = ', '.join(labels)
+                    break
+    user = record.get('user_info')
+    if not result.get('author') and isinstance(user, dict) and isinstance(user.get('fullname'), str):
+        result['author'] = user['fullname']
+    return result
+
+
+def story_card_text(catalog, url):
+    """Telegram HTML caption: source values only, missing values explicit."""
+    metadata = catalog.get('metadata') or {}
+    def clean(value, limit=65):
+        return escape(' '.join(str(value).split())[:limit])
+    def field(name):
+        return clean(metadata.get(name) or 'Not provided')
+    title = clean(catalog.get('title') or 'Story', 90)
+    identity = clean(urlparse(url).path.rstrip('/').rsplit('/', 1)[-1], 200)
+    total = catalog.get('total') or 'Unknown'
+    lines = [f'📖 <b>{title}</b>', '', f'🗣 Language: {field("language")}',
+             f'📊 Total episodes: {clean(total)}', f'🏆 Plays: {field("plays")}',
+             f'⭐ Rating: {field("rating")}', f'💬 Reviews: {field("reviews")}',
+             f'✍️ Author: {field("author")}', f'🎭 Genre: {field("genre")}',
+             f'🆔 Show ID: <code>{identity}</code>']
+    entries = catalog.get('entries') or []
+    counts = {key: sum(e.get('access', 'unknown') == key for e in entries)
+              for key in ('available', 'locked', 'unknown')}
+    lines.extend(['', f'Loaded: {len(entries)} | Available: {counts["available"]} | Locked: {counts["locked"]} | Unknown: {counts["unknown"]}',
+                  'Access is catalogue metadata; playback is not verified.', '/episodes 1 • /available • /save'])
+    return '\n'.join(lines)
+
+
 def catalog_from_values(values, show_id):
     entries = {}
     total = 0
     title = None
     next_ptr = None
     longest_page = -1
+    metadata = {}
     for value in values:
         for item in objects(value):
             if item.get("show_id") != show_id or not isinstance(item.get("stories"), list):
                 continue
             title = item.get("show_title") or title
+            metadata.update(show_metadata(item))
             count = item.get("episodes_count")
             if isinstance(count, int):
                 total = max(total, count)
@@ -157,6 +214,7 @@ def catalog_from_values(values, show_id):
                 }
     return {
         "title": title, "total": total, "next_ptr": next_ptr,
+        "metadata": metadata, "thumbnail": metadata.get('thumbnail'),
         "entries": sorted(entries.values(), key=lambda e: (e["number"], e["id"])),
     }
 
