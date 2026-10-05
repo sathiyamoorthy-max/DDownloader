@@ -31,6 +31,7 @@ from batch_state import BatchStore, pending_indices, failure_report, failure_cat
 from provider_cookies import cookie_header
 from encrypted_media import encryption_markers, export_telegram_format
 from miniapp_bridge import parse_action
+from story_library import StoryLibrary, show_link
 from pocketfm_api import api_url as pocket_api_url, normalize as pocket_normalize
 from kuku_catalog import api_url as kuku_api_url, normalize_page as kuku_normalize
 from pocketfm_api import get_catalog as pocket_api_catalog, refresh_episode as pocket_api_refresh, API_HOST as POCKET_API_HOST, API_PATH as POCKET_API_PATH
@@ -131,6 +132,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DOWNLOAD_ROOT = BASE_DIR / "downloads"
 DOWNLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 BATCH_STORE = BatchStore(os.getenv('BATCH_STATE_PATH', str(BASE_DIR / 'state' / 'batches.sqlite3')))
+STORY_LIBRARY = StoryLibrary(BATCH_STORE.path)
 
 WEBHOOK_SECRET = hashlib.sha256(
     ("ddownloader-render:" + BOT_TOKEN).encode("utf-8")
@@ -2187,6 +2189,12 @@ def cmd_start(message):
         "/episodes 1 - episode list with Public/Locked status\n"
         "/pocketfm <show_id> - open a PocketFM series by ID\n"
         "/kuku <show_slug> - open a Kuku FM series by slug\n"
+        "/gen <show_id or URL> - create a clean show link\n"
+        "/save - bookmark the current series in this chat\n"
+        "/saved [page] - list your saved stories\n"
+        "/search <title> - search YOUR saved stories\n"
+        "/open <saved ID> - reload a saved series\n"
+        "/forget <saved ID> - remove a bookmark\n"
         "/system - binaries and free disk space\n"
         "/whoami - show your Telegram user ID\n"
         "/inspect <url> - inspect manifest/DRM markers\n"
@@ -2427,6 +2435,66 @@ def cmd_series_id(message):
         bot.reply_to(message, str(exc))
         return
     handle_pocket_show(message, series_url=url)
+
+
+@bot.message_handler(commands=["gen", "save", "saved", "search", "open", "forget"])
+def cmd_story_library(message):
+    if not allowed_user(message) or not message.from_user:
+        return
+    parts = (message.text or '').split(maxsplit=1)
+    command = parts[0].split('@', 1)[0].lower()
+    argument = parts[1].strip() if len(parts) > 1 else ''
+    owner, chat = message.from_user.id, message.chat.id
+    try:
+        if command == '/gen':
+            bot.reply_to(message, show_link(argument))
+        elif command == '/save':
+            if argument:
+                raise ValueError('Open a show first, then send /save without arguments.')
+            with _pocket_states_guard:
+                state = dict(_pocket_states.get(owner) or {})
+            if state.get('chat_id') != chat or not state.get('show_url'):
+                raise ValueError('Send a show link in this chat first, then /save.')
+            identity = STORY_LIBRARY.save(owner, chat, state['show_url'], state['title'])
+            bot.reply_to(message, f'Story saved. Reopen with /open {identity}\n/saved lists your bookmarks.')
+        elif command in {'/open', '/forget'}:
+            if not re.fullmatch(r'[1-9][0-9]{0,17}', argument):
+                raise ValueError(f'Use {command} <saved ID> from /saved.')
+            identity = int(argument)
+            row = STORY_LIBRARY.get(owner, chat, identity)
+            if not row:
+                raise ValueError('Saved story not found in your list for this chat.')
+            if command == '/forget':
+                STORY_LIBRARY.delete(owner, chat, identity)
+                bot.reply_to(message, 'Bookmark removed.')
+            else:
+                handle_pocket_show(message, series_url=row['url'])
+        else:
+            page, query = 1, ''
+            if command == '/search':
+                if not argument or len(argument) > 120:
+                    raise ValueError('Use /search <title>, up to 120 characters. Searches your saved stories only.')
+                query = argument
+            elif argument:
+                if not re.fullmatch(r'[1-9][0-9]?', argument):
+                    raise ValueError('Use /saved or /saved <page>.')
+                page = int(argument)
+            rows, total = STORY_LIBRARY.list(owner, chat, query=query, page=page)
+            lines = [f'Your saved stories in this chat: {total}' + (' matches' if query else '')]
+            for row in rows:
+                lines.append(f"\n{row['id']}. {row['title']}\n/open {row['id']}\n{row['url']}")
+            if not rows:
+                lines.append('No stories on this page. Open a show and use /save to bookmark it.')
+            elif query and total > 10:
+                lines.append('First 10 matches shown. Use a more specific search.')
+            elif page * 10 < total:
+                lines.append(f'Next: /saved {page + 1}')
+            bot.reply_to(message, '\n'.join(lines), disable_web_page_preview=True)
+    except ValueError as exc:
+        bot.reply_to(message, str(exc))
+    except Exception:
+        logger.exception('Saved-story operation failed')
+        bot.reply_to(message, 'Saved-story operation failed. Please try again.')
 
 
 @bot.message_handler(func=lambda message: bool(extract_series_url(message.text)))
