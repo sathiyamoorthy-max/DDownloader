@@ -27,6 +27,7 @@ COPY kuku_catalog.py /app/kuku_catalog.py
 COPY pocketfm_api.py /app/pocketfm_api.py
 COPY runtime_checks.py /app/runtime_checks.py
 COPY batch_state.py /app/batch_state.py
+COPY story_library.py /app/story_library.py
 COPY provider_cookies.py /app/provider_cookies.py
 COPY encrypted_media.py /app/encrypted_media.py
 COPY miniapp_bridge.py /app/miniapp_bridge.py
