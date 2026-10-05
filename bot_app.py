@@ -21,7 +21,7 @@ from flask import Flask, jsonify, request, send_file
 import requests
 import telebot
 from telebot import apihelper
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton, WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
@@ -31,7 +31,7 @@ from batch_state import BatchStore, pending_indices, failure_report, failure_cat
 from provider_cookies import cookie_header
 from encrypted_media import encryption_markers, export_telegram_format
 from miniapp_bridge import parse_action
-from story_library import StoryLibrary, show_link
+from story_library import StoryLibrary, show_link, audio_caption
 from pocketfm_api import api_url as pocket_api_url, normalize as pocket_normalize
 from kuku_catalog import api_url as kuku_api_url, normalize_page as kuku_normalize
 from pocketfm_api import get_catalog as pocket_api_catalog, refresh_episode as pocket_api_refresh, API_HOST as POCKET_API_HOST, API_PATH as POCKET_API_PATH
@@ -1230,6 +1230,10 @@ def upload_media_with_progress(
         )
     )
 
+    custom_caption = STORY_LIBRARY.caption(user_id, chat_id)
+    if custom_caption and media_kind in {'audio', 'video'}:
+        caption = audio_caption(custom_caption, title, performer)
+
     api_url = (
         f"{TELEGRAM_API_BASE_URL}/bot{BOT_TOKEN}/{method}"
     )
@@ -2197,6 +2201,8 @@ def cmd_start(message):
         "/search <title> - search YOUR saved stories\n"
         "/open <saved ID> - reload a saved series\n"
         "/forget <saved ID> - remove a bookmark\n"
+        "/caption <text> - custom audio/video caption ({title}, {artist})\n"
+        "/caption reset - remove custom caption\n"
         "/system - binaries and free disk space\n"
         "/whoami - show your Telegram user ID\n"
         "/inspect <url> - inspect manifest/DRM markers\n"
@@ -2499,7 +2505,68 @@ def cmd_story_library(message):
         bot.reply_to(message, 'Saved-story operation failed. Please try again.')
 
 
-def send_story_card(message, catalog, url):
+@bot.message_handler(commands=['caption'])
+def cmd_caption(message):
+    if not allowed_user(message) or not message.from_user:
+        return
+    parts = (message.text or '').split(maxsplit=1)
+    if len(parts) == 1:
+        bot.reply_to(message, 'Send /caption followed by your text.\n'
+                     'Example: /caption 🎧 {title} — {artist}\n'
+                     'Applies to future audio/MP4 uploads in this chat.\n'
+                     '/caption reset removes it.')
+        return
+    template = parts[1].strip()
+    if template.lower() == 'reset':
+        template = ''
+    try:
+        STORY_LIBRARY.set_caption(message.from_user.id, message.chat.id, template)
+        preview = audio_caption(template, 'Episode 1', 'Story name')
+        bot.reply_to(message, 'Caption saved. Preview:\n' + preview if template else 'Custom caption removed.')
+    except ValueError as exc:
+        bot.reply_to(message, str(exc))
+
+
+def story_card_controls(owner, token):
+    markup = InlineKeyboardMarkup()
+    def button(label, action):
+        return InlineKeyboardButton(label, callback_data=f'story:{owner}:{token}:{action}')
+    markup.row(button('🎵 Audio / MP3', 'mp3'), button('🎬 MP4', 'mp4'))
+    markup.row(button('📁 Save Story', 'save'), button('✏️ Edit Caption', 'caption'))
+    markup.row(button('📋 Episodes', 'episodes'), button('⬇️ Available', 'available'))
+    markup.row(button('🏠 Main Menu', 'menu'))
+    return markup
+
+
+@bot.callback_query_handler(func=lambda query: (query.data or '').startswith('story:'))
+def handle_story_button(query):
+    if not query.message or not query.from_user:
+        return
+    match = re.fullmatch(r'story:(\d+):([a-f0-9]{12}):(mp3|mp4|save|caption|episodes|available|menu)', query.data or '')
+    if not match or int(match[1]) != query.from_user.id:
+        bot.answer_callback_query(query.id, 'Open your own story card.', show_alert=True)
+        return
+    command = copy.copy(query.message)
+    command.from_user = query.from_user
+    if not allowed_user(command):
+        bot.answer_callback_query(query.id, 'This bot is private.', show_alert=True)
+        return
+    with _pocket_states_guard:
+        state = _pocket_states.get(query.from_user.id) or {}
+        valid = state.get('chat_id') == query.message.chat.id and state.get('card_token') == match[2]
+    if not valid:
+        bot.answer_callback_query(query.id, 'This card expired. Send the show link again.', show_alert=True)
+        return
+    bot.answer_callback_query(query.id)
+    action = match[3]
+    command.text = '/' + ('start' if action == 'menu' else action)
+    handlers = {'mp3': cmd_output_format, 'mp4': cmd_output_format, 'save': cmd_story_library,
+                'caption': cmd_caption, 'episodes': cmd_episodes, 'available': cmd_available,
+                'menu': cmd_start}
+    handlers[action](command)
+
+
+def send_story_card(message, catalog, url, controls=None):
     caption = story_card_text(catalog, url)
     thumbnail = catalog.get('thumbnail')
     if isinstance(thumbnail, str):
@@ -2509,14 +2576,14 @@ def send_story_card(message, catalog, url):
             if parsed.scheme == 'https' and not (parsed.query or parsed.fragment or parsed.username or parsed.password):
                 validate_public_http_url(thumbnail)
                 if len(caption) <= 1000:
-                    bot.send_photo(message.chat.id, thumbnail, caption=caption, parse_mode='HTML')
+                    bot.send_photo(message.chat.id, thumbnail, caption=caption, parse_mode='HTML', reply_markup=controls)
                 else:
                     bot.send_photo(message.chat.id, thumbnail)
-                    bot.reply_to(message, caption, parse_mode='HTML', disable_web_page_preview=True)
+                    bot.reply_to(message, caption, parse_mode='HTML', disable_web_page_preview=True, reply_markup=controls)
                 return
         except Exception:
             logger.info('Story cover unavailable; sending text card.')
-    bot.reply_to(message, caption, parse_mode='HTML', disable_web_page_preview=True)
+    bot.reply_to(message, caption, parse_mode='HTML', disable_web_page_preview=True, reply_markup=controls)
 
 
 @bot.message_handler(func=lambda message: bool(extract_series_url(message.text)))
@@ -2552,8 +2619,8 @@ def handle_pocket_show(message, series_url=None):
             provider = catalog.get("provider", "pocketfm")
         entries = catalog["entries"]
         title = catalog["title"]
-        send_story_card(message, catalog, url)
         if not entries:
+            send_story_card(message, catalog, url)
             edit_status(
                 message.chat.id,
                 status_message.message_id,
@@ -2562,8 +2629,10 @@ def handle_pocket_show(message, series_url=None):
             )
             return
 
+        card_token = uuid.uuid4().hex[:12]
         with _pocket_states_guard:
             _pocket_states[message.from_user.id] = {
+                "card_token": card_token,
                 "title": title,
                 "show_url": url,
                 "provider": provider,
@@ -2573,6 +2642,7 @@ def handle_pocket_show(message, series_url=None):
                 "created": time.time(),
             }
 
+        send_story_card(message, catalog, url, story_card_controls(message.from_user.id, card_token))
         edit_status(
             message.chat.id,
             status_message.message_id,

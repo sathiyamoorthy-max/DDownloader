@@ -6,6 +6,14 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
+def audio_caption(template, title, performer):
+    """Plain text only. No eval/format attribute access or HTML parsing."""
+    text = re.sub(r'\{(title|artist)\}',
+                  lambda match: str(title if match[1] == 'title' else (performer or '')),
+                  template)
+    return text.encode('utf-16-le')[:2000].decode('utf-16-le', errors='ignore')
+
+
 def show_link(value):
     value = value.strip()
     if re.fullmatch(r'[a-fA-F0-9]{24,64}', value):
@@ -34,6 +42,25 @@ class StoryLibrary:
                 id INTEGER PRIMARY KEY AUTOINCREMENT, owner INTEGER NOT NULL,
                 chat INTEGER NOT NULL, url TEXT NOT NULL, title TEXT NOT NULL,
                 updated REAL NOT NULL, UNIQUE(owner, chat, url))''')
+            db.execute('''CREATE TABLE IF NOT EXISTS audio_captions (
+                owner INTEGER, chat INTEGER, template TEXT NOT NULL,
+                PRIMARY KEY(owner, chat))''')
+
+    def set_caption(self, owner, chat, template):
+        if len(template.encode('utf-16-le')) > 1000:
+            raise ValueError('Caption is too long. Use up to 500 characters (emoji count as two).')
+        with self.connect() as db:
+            if template:
+                db.execute('INSERT OR REPLACE INTO audio_captions VALUES (?, ?, ?)',
+                           (owner, chat, template))
+            else:
+                db.execute('DELETE FROM audio_captions WHERE owner=? AND chat=?', (owner, chat))
+
+    def caption(self, owner, chat):
+        with self.connect() as db:
+            row = db.execute('SELECT template FROM audio_captions WHERE owner=? AND chat=?',
+                             (owner, chat)).fetchone()
+        return row[0] if row else ''
 
     def connect(self):
         db = sqlite3.connect(self.path, timeout=20)

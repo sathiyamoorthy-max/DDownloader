@@ -26,6 +26,22 @@ update does not vendor its CLI or claim compatibility with another bot's private
 backend. Automatic unlock, bonus claims, scheduled subscriptions, custom audio
 metadata and album delivery are not added by this update.
 
+## Story card controls and captions
+
+Cards now have Audio/MP3, MP4, Save Story, Edit Caption, Episodes, Available and
+Main Menu buttons. A card works only for its requesting user in the same chat
+while that story remains selected. Send the show link again after a restart or
+after selecting a different story. Available starts downloading the entries
+labelled available by the loaded catalogue; it is not an unlock operation.
+
+`/caption <text>` sets a plain-text caption for future audio/MP4 uploads by that
+user in that chat. `{title}` and `{artist}` are replaced with media metadata.
+`/caption reset` removes the setting. Templates are limited to 500 UTF-16 code
+units and expanded captions to 1000. Captions use the same SQLite persistence
+and Render disk limitations as bookmarks. This changes the message caption,
+not the artist tag embedded in the audio file. No third-party bot code was
+copied for these controls.
+
 Validation: `python -m unittest discover -s tests` includes persistence,
 credential stripping, owner/chat isolation, pagination, limits and bot command
 dispatch without contacting Telegram or a paid provider account.
